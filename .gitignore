@@ -1,0 +1,4 @@
+build/
+.task/
+node_modules/
+server/priv/static/app.js

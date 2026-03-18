@@ -1,0 +1,51 @@
+version: '3'
+
+tasks:
+  default:
+    deps: [server]
+
+  shared:
+    dir: shared
+    cmds:
+      - gleam build
+    sources:
+      - src/**/*.gleam
+      - gleam.toml
+    generates:
+      - build/**
+
+  client:
+    deps: [shared]
+    cmds:
+      - cd client && gleam build
+      - mkdir -p server/priv/static
+      - npx --yes esbuild client/build/dev/javascript/client/client.mjs
+          --bundle --outfile=server/priv/static/app.js
+          --format=esm --platform=browser
+    sources:
+      - client/src/**/*.gleam
+      - client/gleam.toml
+      - shared/src/**/*.gleam
+    generates:
+      - server/priv/static/app.js
+
+  server:
+    deps: [client]
+    dir: server
+    cmds:
+      - gleam build
+    sources:
+      - src/**/*.gleam
+      - gleam.toml
+    generates:
+      - build/**
+
+  run:
+    deps: [server]
+    dir: server
+    cmds:
+      - gleam run
+
+  clean:
+    cmds:
+      - rm -rf shared/build client/build server/build server/priv/static
