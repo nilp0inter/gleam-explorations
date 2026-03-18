@@ -2,3 +2,8 @@ build/
 .task/
 node_modules/
 server/priv/static/app.js
+
+
+### Created by https://www.gitignore.io
+### direnv ###
+.direnv
