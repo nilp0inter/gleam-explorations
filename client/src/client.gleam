@@ -116,104 +116,95 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
 // === View ===
 
 fn view(model: Model) -> Element(Msg) {
-  html.div(
-    [attribute.styles([#("display", "flex"), #("height", "100vh")])],
-    [
-      // Left sidebar: queue list
-      html.div(
-        [
-          attribute.styles([
-            #("width", "250px"),
-            #("border-right", "1px solid #ccc"),
-            #("padding", "16px"),
-            #("overflow-y", "auto"),
-          ]),
-        ],
-        [
-          html.h2([], [text("Queues")]),
+  html.div([attribute.class("flex h-screen bg-gray-50 text-gray-900 font-sans")], [
+    // Left sidebar: queue list
+    html.div(
+      [attribute.class("w-72 bg-white border-r border-gray-200 flex flex-col")],
+      [
+        html.div(
+          [attribute.class("px-5 py-4 text-sm font-semibold uppercase tracking-wider text-gray-500 border-b border-gray-200")],
+          [text("Queues")],
+        ),
+        html.div([attribute.class("flex-1 overflow-y-auto p-3")], [
           case model.queues {
-            [] -> html.p([attribute.styles([#("color", "#888")])], [text("No queues yet. POST to /publish/<name> to create one.")])
+            [] ->
+              html.p(
+                [attribute.class("px-2 py-8 text-sm text-gray-400 text-center")],
+                [text("No queues yet. POST to /publish/<name> to create one.")],
+              )
             queues ->
               html.ul(
-                [attribute.styles([#("list-style", "none"), #("padding", "0")])],
+                [attribute.class("space-y-1")],
                 list.map(queues, fn(queue) {
                   let is_selected = model.selected_queue == Some(queue)
                   html.li(
                     [
                       event.on_click(ClickQueue(queue)),
-                      attribute.styles([
-                        #("cursor", "pointer"),
-                        #("padding", "8px 12px"),
-                        #("margin", "4px 0"),
-                        #("border-radius", "4px"),
-                        #("background", case is_selected {
-                          True -> "#4a90d9"
-                          False -> "#f0f0f0"
-                        }),
-                        #("color", case is_selected {
-                          True -> "white"
-                          False -> "#333"
-                        }),
-                      ]),
+                      attribute.class(case is_selected {
+                        True ->
+                          "cursor-pointer px-3 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white"
+                        False ->
+                          "cursor-pointer px-3 py-2 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 transition-colors"
+                      }),
                     ],
                     [text(queue)],
                   )
                 }),
               )
           },
-        ],
-      ),
-      // Right panel: messages
-      html.div(
-        [
-          attribute.styles([
-            #("flex", "1"),
-            #("padding", "16px"),
-            #("overflow-y", "auto"),
-          ]),
-        ],
-        [
-          case model.selected_queue {
-            None ->
-              html.p(
-                [attribute.styles([#("color", "#888")])],
-                [text("Select a queue to view messages")],
-              )
-            Some(queue) -> {
-              let msgs = case dict.get(model.messages, queue) {
-                Ok(m) -> m
-                Error(_) -> []
-              }
-              html.div([], [
-                html.h2([], [text("Queue: " <> queue)]),
+        ]),
+      ],
+    ),
+    // Right panel: messages
+    html.div(
+      [attribute.class("flex-1 flex flex-col min-w-0")],
+      [
+        case model.selected_queue {
+          None ->
+            html.div(
+              [attribute.class("flex-1 flex items-center justify-center")],
+              [
+                html.p(
+                  [attribute.class("text-gray-400 text-lg")],
+                  [text("Select a queue to view messages")],
+                ),
+              ],
+            )
+          Some(queue) -> {
+            let msgs = case dict.get(model.messages, queue) {
+              Ok(m) -> m
+              Error(_) -> []
+            }
+            html.div([attribute.class("flex-1 flex flex-col min-h-0")], [
+              html.div(
+                [attribute.class("px-6 py-4 text-lg font-semibold border-b border-gray-200 bg-white")],
+                [text("Queue: " <> queue)],
+              ),
+              html.div([attribute.class("flex-1 overflow-y-auto p-6")], [
                 case msgs {
-                  [] -> html.p([attribute.styles([#("color", "#888")])], [text("No messages in this queue yet.")])
+                  [] ->
+                    html.p(
+                      [attribute.class("text-gray-400 text-sm py-8 text-center")],
+                      [text("No messages in this queue yet.")],
+                    )
                   _ ->
                     html.ul(
-                      [attribute.styles([#("list-style", "none"), #("padding", "0")])],
+                      [attribute.class("space-y-2")],
                       list.map(msgs, fn(m) {
                         html.li(
-                          [
-                            attribute.styles([
-                              #("padding", "8px 12px"),
-                              #("margin", "4px 0"),
-                              #("background", "#f8f8f8"),
-                              #("border-radius", "4px"),
-                              #("border-left", "3px solid #4a90d9"),
-                            ]),
-                          ],
+                          [attribute.class("px-4 py-3 bg-white rounded-lg border border-gray-200 text-sm font-mono shadow-sm")],
                           [text(m)],
                         )
                       }),
                     )
                 },
-              ])
-            }
-          },
-        ],
-      ),
-    ],
-  )
+              ]),
+            ])
+          }
+        },
+      ],
+    ),
+  ])
 }
 
 // === Main ===

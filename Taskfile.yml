@@ -29,8 +29,14 @@ tasks:
     generates:
       - server/priv/static/app.js
 
+  css:
+    deps: [shared]
+    cmds:
+      - mkdir -p server/priv/static
+      - npx --yes @tailwindcss/cli -i client/src/app.css -o server/priv/static/app.css
+
   server:
-    deps: [client]
+    deps: [client, css]
     dir: server
     cmds:
       - gleam build

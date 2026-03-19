@@ -2,6 +2,7 @@ build/
 .task/
 node_modules/
 server/priv/static/app.js
+server/priv/static/app.css
 
 
 ### Created by https://www.gitignore.io
