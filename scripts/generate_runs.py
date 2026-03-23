@@ -22,8 +22,10 @@ def number_to_color(n: int) -> str:
 
 
 def generate_run() -> dict:
-    force = round(random.uniform(0.5, 10.0), 2)
-    duration = round(random.uniform(0.5, 12.0), 2)
+    # Correlated but not deterministic: mix a shared factor with independent noise
+    shared = random.random()  # 0..1, drives the correlation
+    force = round(0.5 + 9.5 * (0.6 * shared + 0.4 * random.random()), 2)
+    duration = round(0.5 + 11.5 * (0.6 * shared + 0.4 * random.random()), 2)
     winning_number = random.randint(0, 36)
     color = number_to_color(winning_number)
     return {
