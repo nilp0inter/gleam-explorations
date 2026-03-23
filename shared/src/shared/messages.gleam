@@ -7,10 +7,29 @@ pub type TestRun {
   TestRun(force: Float, duration: Float, winning_number: Int, color: String)
 }
 
+pub type BucketCount {
+  BucketCount(name: String, count: Int)
+}
+
+pub type SankeyLink {
+  SankeyLink(source: String, target: String, value: Int)
+}
+
+pub type Stats {
+  Stats(
+    total: Int,
+    force_counts: List(BucketCount),
+    duration_counts: List(BucketCount),
+    number_counts: List(BucketCount),
+    color_counts: List(BucketCount),
+    links: List(SankeyLink),
+  )
+}
+
 // === Server -> Client Messages ===
 
 pub type ServerMessage {
-  NewTestRun(run: TestRun)
+  StatsSnapshot(stats: Stats)
 }
 
 // === Client -> Server Messages ===
@@ -30,12 +49,41 @@ fn encode_test_run_fields(run: TestRun) -> List(#(String, json.Json)) {
   ]
 }
 
+fn encode_bucket_count(bc: BucketCount) -> json.Json {
+  json.object([
+    #("name", json.string(bc.name)),
+    #("count", json.int(bc.count)),
+  ])
+}
+
+fn encode_sankey_link(link: SankeyLink) -> json.Json {
+  json.object([
+    #("source", json.string(link.source)),
+    #("target", json.string(link.target)),
+    #("value", json.int(link.value)),
+  ])
+}
+
+fn encode_stats(stats: Stats) -> List(#(String, json.Json)) {
+  [
+    #("total", json.int(stats.total)),
+    #("force_counts", json.array(stats.force_counts, encode_bucket_count)),
+    #(
+      "duration_counts",
+      json.array(stats.duration_counts, encode_bucket_count),
+    ),
+    #("number_counts", json.array(stats.number_counts, encode_bucket_count)),
+    #("color_counts", json.array(stats.color_counts, encode_bucket_count)),
+    #("links", json.array(stats.links, encode_sankey_link)),
+  ]
+}
+
 pub fn encode_server_message(msg: ServerMessage) -> String {
   case msg {
-    NewTestRun(run) ->
+    StatsSnapshot(stats) ->
       json.object([
-        #("type", json.string("new_test_run")),
-        ..encode_test_run_fields(run)
+        #("type", json.string("stats_snapshot")),
+        ..encode_stats(stats)
       ])
   }
   |> json.to_string
@@ -66,11 +114,79 @@ fn test_run_decoder() -> decode.Decoder(TestRun) {
   })
 }
 
+fn bucket_count_decoder() -> decode.Decoder(BucketCount) {
+  decode.field("name", decode.string, fn(name) {
+    decode.field("count", decode.int, fn(count) {
+      decode.success(BucketCount(name:, count:))
+    })
+  })
+}
+
+fn sankey_link_decoder() -> decode.Decoder(SankeyLink) {
+  decode.field("source", decode.string, fn(source) {
+    decode.field("target", decode.string, fn(target) {
+      decode.field("value", decode.int, fn(value) {
+        decode.success(SankeyLink(source:, target:, value:))
+      })
+    })
+  })
+}
+
+fn stats_decoder() -> decode.Decoder(Stats) {
+  decode.field("total", decode.int, fn(total) {
+    decode.field("force_counts", decode.list(bucket_count_decoder()), fn(fc) {
+      decode.field(
+        "duration_counts",
+        decode.list(bucket_count_decoder()),
+        fn(dc) {
+          decode.field(
+            "number_counts",
+            decode.list(bucket_count_decoder()),
+            fn(nc) {
+              decode.field(
+                "color_counts",
+                decode.list(bucket_count_decoder()),
+                fn(cc) {
+                  decode.field(
+                    "links",
+                    decode.list(sankey_link_decoder()),
+                    fn(links) {
+                      decode.success(Stats(
+                        total:,
+                        force_counts: fc,
+                        duration_counts: dc,
+                        number_counts: nc,
+                        color_counts: cc,
+                        links:,
+                      ))
+                    },
+                  )
+                },
+              )
+            },
+          )
+        },
+      )
+    })
+  })
+}
+
 pub fn server_message_decoder() -> decode.Decoder(ServerMessage) {
   use tag <- decode.then(decode.at(["type"], decode.string))
   case tag {
-    "new_test_run" -> test_run_decoder() |> decode.map(NewTestRun)
-    _ -> decode.failure(NewTestRun(TestRun(0.0, 0.0, 0, "")), "ServerMessage")
+    "stats_snapshot" -> stats_decoder() |> decode.map(StatsSnapshot)
+    _ ->
+      decode.failure(
+        StatsSnapshot(Stats(
+          total: 0,
+          force_counts: [],
+          duration_counts: [],
+          number_counts: [],
+          color_counts: [],
+          links: [],
+        )),
+        "ServerMessage",
+      )
   }
 }
 

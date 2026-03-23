@@ -1,3 +1,4 @@
+import gleam/dynamic/decode
 import gleam/int
 import gleam/json
 import gleam/list
@@ -9,7 +10,8 @@ import lustre/element.{type Element, text}
 import lustre/element/html
 import lustre/event
 import lustre_websocket as ws
-import shared/messages.{type TestRun}
+import shared/classify
+import shared/messages.{type Stats}
 
 // === FFI ===
 
@@ -26,8 +28,7 @@ fn do_clear_highlight() -> Nil
 
 pub type Model {
   Model(
-    runs: List(TestRun),
-    run_count: Int,
+    stats: Option(Stats),
     socket: Option(ws.WebSocket),
     expanded_steps: List(Int),
     selected_nodes: List(String),
@@ -39,7 +40,7 @@ pub type Model {
 pub type Msg {
   WsEvent(ws.WebSocketEvent)
   ToggleStep(Int)
-  ToggleNode(String, Int)
+  ToggleNode(node: String, depth: Int, ctrl: Bool)
   ClearSelection
 }
 
@@ -48,85 +49,12 @@ pub type Msg {
 fn init(_flags) -> #(Model, effect.Effect(Msg)) {
   let model =
     Model(
-      runs: [],
-      run_count: 0,
+      stats: None,
       socket: None,
       expanded_steps: [],
       selected_nodes: [],
     )
   #(model, ws.init("/ws", WsEvent))
-}
-
-// === Bucket classification ===
-
-fn classify_force(force: Float) -> String {
-  case force <. 3.0 {
-    True -> "Low Force"
-    False ->
-      case force <=. 7.0 {
-        True -> "Medium Force"
-        False -> "High Force"
-      }
-  }
-}
-
-fn classify_duration(duration: Float) -> String {
-  case duration <. 3.0 {
-    True -> "Short Duration"
-    False ->
-      case duration <=. 7.0 {
-        True -> "Medium Duration"
-        False -> "Long Duration"
-      }
-  }
-}
-
-fn classify_number(n: Int) -> String {
-  int.to_string(n)
-}
-
-fn classify_color(color: String) -> String {
-  case color {
-    "red" -> "Red"
-    "black" -> "Black"
-    "green" -> "Green"
-    _ -> color
-  }
-}
-
-fn classify_run_at_depth(run: TestRun, depth: Int) -> String {
-  case depth {
-    0 -> classify_force(run.force)
-    1 -> classify_duration(run.duration)
-    2 -> classify_number(run.winning_number)
-    3 -> classify_color(run.color)
-    _ -> ""
-  }
-}
-
-fn bucket_counts(
-  runs: List(TestRun),
-  depth: Int,
-) -> List(#(String, Int)) {
-  let classified = list.map(runs, fn(run) { classify_run_at_depth(run, depth) })
-  let buckets = bucket_names_for_depth(depth)
-  list.map(buckets, fn(bucket) {
-    let count =
-      list.filter(classified, fn(c) { c == bucket })
-      |> list.length
-    #(bucket, count)
-  })
-}
-
-fn bucket_names_for_depth(depth: Int) -> List(String) {
-  case depth {
-    0 -> ["Low Force", "Medium Force", "High Force"]
-    1 -> ["Short Duration", "Medium Duration", "Long Duration"]
-    2 ->
-      list.map(list.range(0, 36), int.to_string)
-    3 -> ["Green", "Red", "Black"]
-    _ -> []
-  }
 }
 
 // === Highlight effect ===
@@ -145,21 +73,20 @@ fn apply_highlight(selected_nodes: List(String)) -> effect.Effect(Msg) {
 
 // === Update ===
 
-fn encode_runs(runs: List(TestRun)) -> String {
-  json.array(runs, fn(run) {
+fn encode_links(links: List(messages.SankeyLink)) -> String {
+  json.array(links, fn(link) {
     json.object([
-      #("force", json.float(run.force)),
-      #("duration", json.float(run.duration)),
-      #("winning_number", json.int(run.winning_number)),
-      #("color", json.string(run.color)),
+      #("source", json.string(link.source)),
+      #("target", json.string(link.target)),
+      #("value", json.int(link.value)),
     ])
   })
   |> json.to_string
 }
 
-fn update_chart(runs: List(TestRun)) -> effect.Effect(Msg) {
+fn update_chart(stats: Stats) -> effect.Effect(Msg) {
   effect.from(fn(_dispatch) {
-    let json_str = encode_runs(runs)
+    let json_str = encode_links(stats.links)
     do_update_chart(json_str)
   })
 }
@@ -172,11 +99,9 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
 
     WsEvent(ws.OnTextMessage(text)) -> {
       case json.parse(text, messages.server_message_decoder()) {
-        Ok(messages.NewTestRun(run)) -> {
-          let new_runs = [run, ..model.runs]
-          let new_count = model.run_count + 1
-          let new_model = Model(..model, runs: new_runs, run_count: new_count)
-          #(new_model, update_chart(new_runs))
+        Ok(messages.StatsSnapshot(stats)) -> {
+          let new_model = Model(..model, stats: Some(stats))
+          #(new_model, update_chart(stats))
         }
         Error(_) -> #(model, effect.none())
       }
@@ -190,8 +115,7 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
       let is_expanded = list.contains(model.expanded_steps, depth)
       case is_expanded {
         True -> {
-          // Collapse: remove step and deselect any nodes from this depth
-          let depth_buckets = bucket_names_for_depth(depth)
+          let depth_buckets = classify.bucket_names_for_depth(depth)
           let new_selected =
             list.filter(model.selected_nodes, fn(n) {
               !list.contains(depth_buckets, n)
@@ -218,26 +142,35 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
       }
     }
 
-    ToggleNode(node, depth) -> {
+    ToggleNode(node, depth, ctrl) -> {
       let is_selected = list.contains(model.selected_nodes, node)
       case is_selected {
-        // Clicking the active node: deselect it (clear this step's filter)
         True -> {
           let new_selected =
             list.filter(model.selected_nodes, fn(n) { n != node })
           let new_model = Model(..model, selected_nodes: new_selected)
           #(new_model, apply_highlight(new_selected))
         }
-        // Clicking a different node: replace any existing selection at this depth
         False -> {
-          let depth_buckets = bucket_names_for_depth(depth)
-          let without_depth =
-            list.filter(model.selected_nodes, fn(n) {
-              !list.contains(depth_buckets, n)
-            })
-          let new_selected = [node, ..without_depth]
-          let new_model = Model(..model, selected_nodes: new_selected)
-          #(new_model, apply_highlight(new_selected))
+          case ctrl {
+            // Ctrl+click: add node to selection (OR within same depth)
+            True -> {
+              let new_selected = [node, ..model.selected_nodes]
+              let new_model = Model(..model, selected_nodes: new_selected)
+              #(new_model, apply_highlight(new_selected))
+            }
+            // Normal click: replace selection at this depth
+            False -> {
+              let depth_buckets = classify.bucket_names_for_depth(depth)
+              let without_depth =
+                list.filter(model.selected_nodes, fn(n) {
+                  !list.contains(depth_buckets, n)
+                })
+              let new_selected = [node, ..without_depth]
+              let new_model = Model(..model, selected_nodes: new_selected)
+              #(new_model, apply_highlight(new_selected))
+            }
+          }
         }
       }
     }
@@ -258,6 +191,40 @@ fn view(model: Model) -> Element(Msg) {
     [attribute.class("flex h-screen bg-gray-50 text-gray-900 font-sans")],
     [view_gherkin(model), view_chart()],
   )
+}
+
+fn get_total(model: Model) -> Int {
+  case model.stats {
+    Some(stats) -> stats.total
+    None -> 0
+  }
+}
+
+fn get_bucket_counts(
+  model: Model,
+  depth: Int,
+) -> List(#(String, Int)) {
+  let counts = case model.stats {
+    Some(stats) ->
+      case depth {
+        0 -> stats.force_counts
+        1 -> stats.duration_counts
+        2 -> stats.number_counts
+        3 -> stats.color_counts
+        _ -> []
+      }
+    None -> []
+  }
+  // Convert BucketCount list to tuples, ensuring all bucket names present
+  let count_map =
+    list.map(counts, fn(bc) { #(bc.name, bc.count) })
+  let buckets = classify.bucket_names_for_depth(depth)
+  list.map(buckets, fn(name) {
+    case list.find(count_map, fn(pair) { pair.0 == name }) {
+      Ok(pair) -> pair
+      Error(_) -> #(name, 0)
+    }
+  })
 }
 
 fn view_gherkin(model: Model) -> Element(Msg) {
@@ -358,7 +325,7 @@ fn view_gherkin(model: Model) -> Element(Msg) {
                   "inline-flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 font-bold text-xs",
                 ),
               ],
-              [text(int.to_string(model.run_count))],
+              [text(int.to_string(get_total(model)))],
             ),
             text("test runs received"),
           ],
@@ -396,69 +363,15 @@ fn view_gherkin(model: Model) -> Element(Msg) {
             )
         },
       ]),
-      html.div([attribute.class("mt-6")], [
-        html.h2([attribute.class("text-sm font-semibold text-gray-500 mb-2")], [
-          text("RECENT RUNS"),
-        ]),
-        html.div(
-          [attribute.class("space-y-1 max-h-64 overflow-y-auto")],
-          list.map(list.take(model.runs, 20), fn(run) {
-            html.div(
-              [
-                attribute.class(
-                  "text-xs font-mono px-3 py-1.5 bg-gray-100 rounded flex justify-between",
-                ),
-              ],
-              [
-                html.span([], [
-                  text(
-                    "#"
-                    <> int.to_string(run.winning_number)
-                    <> " "
-                    <> run.color,
-                  ),
-                ]),
-                html.span([attribute.class("text-gray-400")], [
-                  text(
-                    "F:"
-                    <> float_to_short(run.force)
-                    <> " D:"
-                    <> float_to_short(run.duration)
-                    <> "s",
-                  ),
-                ]),
-              ],
-            )
-          }),
-        ),
-      ]),
     ],
   )
 }
 
-fn float_to_short(f: Float) -> String {
-  let s = int.to_string(float_to_int(f))
-  let d =
-    int.to_string(float_to_int(
-      { f -. int_to_float(float_to_int(f)) } *. 10.0,
-    ))
-  s <> "." <> d
-}
-
-@external(javascript, "./client_ffi_helpers.mjs", "floatToInt")
-fn float_to_int(f: Float) -> Int
-
-@external(javascript, "./client_ffi_helpers.mjs", "intToFloat")
-fn int_to_float(i: Int) -> Float
-
 fn bucket_color(name: String) -> String {
   case name {
-    "Low Force" -> "#60a5fa"
-    "Medium Force" -> "#f59e0b"
-    "High Force" -> "#ef4444"
-    "Short Duration" -> "#34d399"
-    "Medium Duration" -> "#a78bfa"
-    "Long Duration" -> "#f87171"
+    "Low Force" | "Short Duration" -> "#60a5fa"
+    "Medium Force" | "Medium Duration" -> "#f59e0b"
+    "High Force" | "Long Duration" -> "#a855f7"
     "Red" -> "#dc2626"
     "Black" -> "#1f2937"
     "Green" -> "#16a34a"
@@ -488,7 +401,7 @@ fn gherkin_line(
   }
   let has_selection_at_depth = case depth {
     Some(d) -> {
-      let buckets = bucket_names_for_depth(d)
+      let buckets = classify.bucket_names_for_depth(d)
       list.any(model.selected_nodes, fn(n) { list.contains(buckets, n) })
     }
     None -> False
@@ -530,9 +443,25 @@ fn gherkin_line(
   ])
 }
 
+@external(javascript, "./client_ffi_helpers.mjs", "intToFloat")
+fn int_to_float(i: Int) -> Float
+
+fn float_to_short(f: Float) -> String {
+  let i = float_to_int(f)
+  let s = int.to_string(i)
+  let d =
+    int.to_string(float_to_int(
+      { f -. int_to_float(i) } *. 10.0,
+    ))
+  s <> "." <> d
+}
+
+@external(javascript, "./client_ffi_helpers.mjs", "floatToInt")
+fn float_to_int(f: Float) -> Int
+
 fn view_bucket_panel(model: Model, depth: Int) -> Element(Msg) {
-  let counts = bucket_counts(model.runs, depth)
-  let total = model.run_count
+  let counts = get_bucket_counts(model, depth)
+  let total = get_total(model)
   html.div(
     [
       attribute.class(
@@ -573,7 +502,11 @@ fn view_bucket_panel(model: Model, depth: Int) -> Element(Msg) {
                   False -> "bg-gray-50 border-gray-200 hover:bg-gray-100"
                 },
               ),
-              event.on_click(ToggleNode(name, depth)),
+              event.on("click", {
+                decode.field("ctrlKey", decode.bool, fn(ctrl) {
+                  decode.success(ToggleNode(name, depth, ctrl))
+                })
+              }),
             ],
             [
               html.span(

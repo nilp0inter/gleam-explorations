@@ -82,6 +82,15 @@ def generate_run() -> dict:
     }
 
 
+async def drain(ws):
+    """Continuously read and discard incoming messages to prevent buffer backup."""
+    try:
+        async for _ in ws:
+            pass
+    except websockets.exceptions.ConnectionClosed:
+        pass
+
+
 async def main():
     url = "ws://localhost:8080/ws"
     rate = float(sys.argv[1]) if len(sys.argv) > 1 else 2.0  # runs per second
@@ -91,6 +100,7 @@ async def main():
     print(f"Connecting to {url}...")
     print("*** UNFAIR ROULETTE MODE ***")
     async with websockets.connect(url) as ws:
+        asyncio.create_task(drain(ws))
         print(f"Connected. Sending {total or '∞'} runs at {rate}/s")
         count = 0
         while total == 0 or count < total:

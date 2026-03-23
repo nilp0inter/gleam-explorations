@@ -16,26 +16,6 @@ function getChart() {
   return chart;
 }
 
-function classifyForce(f) {
-  if (f < 3) return "Low Force";
-  if (f <= 7) return "Medium Force";
-  return "High Force";
-}
-
-function classifyDuration(d) {
-  if (d < 3) return "Short Duration";
-  if (d <= 7) return "Medium Duration";
-  return "Long Duration";
-}
-
-function classifyNumber(n) {
-  return String(n);
-}
-
-function classifyColor(c) {
-  return c.charAt(0).toUpperCase() + c.slice(1);
-}
-
 const RED_NUMBERS = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
 
 const DEPTH_MAP = {};
@@ -47,10 +27,10 @@ for (let i = 0; i <= 36; i++) DEPTH_MAP[String(i)] = 2;
 const COLOR_MAP = {
   "Low Force": "#60a5fa",
   "Medium Force": "#f59e0b",
-  "High Force": "#ef4444",
-  "Short Duration": "#34d399",
-  "Medium Duration": "#a78bfa",
-  "Long Duration": "#f87171",
+  "High Force": "#a855f7",
+  "Short Duration": "#60a5fa",
+  "Medium Duration": "#f59e0b",
+  "Long Duration": "#a855f7",
   "Red": "#dc2626",
   "Black": "#1f2937",
   "Green": "#16a34a",
@@ -104,6 +84,42 @@ function getFullChain(startNodes) {
   }
 
   return visited;
+}
+
+// Group selected nodes by depth, union chains within each depth (OR),
+// then intersect across depths (AND).
+function computeActiveNodes(nodeNames) {
+  // Group by depth
+  const byDepth = {};
+  for (const name of nodeNames) {
+    const d = DEPTH_MAP[name];
+    if (d === undefined) continue;
+    if (!byDepth[d]) byDepth[d] = [];
+    byDepth[d].push(name);
+  }
+
+  const depths = Object.keys(byDepth);
+  if (depths.length === 0) return new Set();
+
+  // For each depth: union the chains of all selected nodes at that depth
+  const perDepth = depths.map((d) => {
+    const union = new Set();
+    for (const name of byDepth[d]) {
+      for (const n of getFullChain([name])) {
+        union.add(n);
+      }
+    }
+    return union;
+  });
+
+  // Intersect across depths
+  return perDepth.reduce((acc, set) => {
+    const result = new Set();
+    for (const node of acc) {
+      if (set.has(node)) result.add(node);
+    }
+    return result;
+  });
 }
 
 function applyHighlight(c, activeNodes) {
@@ -177,28 +193,10 @@ export function updateChart(jsonString) {
   const c = getChart();
   if (!c) return;
 
-  const runs = JSON.parse(jsonString);
-  if (runs.length === 0) {
+  const links = JSON.parse(jsonString);
+  if (links.length === 0) {
     c.setOption({ series: [] });
     return;
-  }
-
-  const forceDuration = {};
-  const durationNumber = {};
-  const numberColor = {};
-
-  for (const run of runs) {
-    const f = classifyForce(run.force);
-    const d = classifyDuration(run.duration);
-    const n = classifyNumber(run.winning_number);
-    const col = classifyColor(run.color);
-
-    const fd = `${f}||${d}`;
-    forceDuration[fd] = (forceDuration[fd] || 0) + 1;
-    const dn = `${d}||${n}`;
-    durationNumber[dn] = (durationNumber[dn] || 0) + 1;
-    const nc = `${n}||${col}`;
-    numberColor[nc] = (numberColor[nc] || 0) + 1;
   }
 
   // Fixed node order: left-to-right within each depth level
@@ -210,19 +208,6 @@ export function updateChart(jsonString) {
     ...NUMBERS,
     "Green", "Red", "Black",
   ];
-
-  const links = [];
-
-  function addLinks(map) {
-    for (const [key, value] of Object.entries(map)) {
-      const [source, target] = key.split("||");
-      links.push({ source, target, value });
-    }
-  }
-
-  addLinks(forceDuration);
-  addLinks(durationNumber);
-  addLinks(numberColor);
 
   // Collect which nodes actually appear in the data
   const activeNodes = new Set();
@@ -273,15 +258,7 @@ export function updateChart(jsonString) {
 
   // Re-apply active selection after chart data rebuild
   if (activeSelection.length > 0) {
-    const chains = activeSelection.map((name) => getFullChain([name]));
-    const intersection = chains.reduce((acc, chain) => {
-      const result = new Set();
-      for (const node of acc) {
-        if (chain.has(node)) result.add(node);
-      }
-      return result;
-    });
-    applyHighlight(c, intersection);
+    applyHighlight(c, computeActiveNodes(activeSelection));
   }
 
   setupChartEvents(c);
@@ -301,17 +278,7 @@ export function highlightNodes(jsonArray) {
   }
 
   externalHighlight = true;
-
-  const chains = nodeNames.map((name) => getFullChain([name]));
-  const intersection = chains.reduce((acc, chain) => {
-    const result = new Set();
-    for (const node of acc) {
-      if (chain.has(node)) result.add(node);
-    }
-    return result;
-  });
-
-  applyHighlight(c, intersection);
+  applyHighlight(c, computeActiveNodes(nodeNames));
 }
 
 export function clearHighlight() {

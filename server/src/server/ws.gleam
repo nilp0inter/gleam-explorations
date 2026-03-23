@@ -41,8 +41,7 @@ pub fn handler(
     mist.Text(text) -> {
       case json.parse(text, messages.client_message_decoder()) {
         Ok(messages.SubmitTestRun(run)) -> {
-          let encoded = messages.encode_server_message(messages.NewTestRun(run))
-          process.send(ws_state.state_actor, state.BroadcastTestRun(encoded))
+          process.send(ws_state.state_actor, state.IngestTestRun(run))
         }
         Error(_) -> Nil
       }
