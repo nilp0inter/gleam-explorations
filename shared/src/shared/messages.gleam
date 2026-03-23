@@ -3,12 +3,16 @@ import gleam/json
 
 // === Types ===
 
-pub type TestRun {
-  TestRun(force: Float, duration: Float, winning_number: Int, color: String)
+pub type RunInfo {
+  RunInfo(run_id: String, created_at: String, sample_count: Int)
 }
 
-pub type FullTestRun {
-  FullTestRun(
+pub type Sample {
+  Sample(force: Float, duration: Float, winning_number: Int, color: String)
+}
+
+pub type FullSample {
+  FullSample(
     force: Float,
     duration: Float,
     winning_number: Int,
@@ -45,12 +49,12 @@ pub type Stats {
   )
 }
 
-pub type RunSummary {
-  RunSummary(id: Int, start_date: String, end_date: String, status: String)
+pub type SampleSummary {
+  SampleSummary(id: Int, start_date: String, end_date: String, status: String)
 }
 
-pub type RunDetail {
-  RunDetail(
+pub type SampleDetail {
+  SampleDetail(
     id: Int,
     force: Float,
     duration: Float,
@@ -73,50 +77,54 @@ pub type RunDetail {
 
 pub type ServerMessage {
   StatsSnapshot(stats: Stats)
-  MatchingRuns(runs: List(RunSummary))
-  MatchingRunAppend(run: RunSummary)
-  AllRuns(runs: List(RunSummary))
-  NewRun(run: RunSummary)
-  RunDetailResponse(detail: RunDetail)
+  MatchingSamples(samples: List(SampleSummary))
+  MatchingSampleAppend(sample: SampleSummary)
+  AllSamples(samples: List(SampleSummary))
+  NewSample(sample: SampleSummary)
+  SampleDetailResponse(detail: SampleDetail)
+  RunList(runs: List(RunInfo))
+  RunCreated(run: RunInfo)
 }
 
 // === Client -> Server Messages ===
 
 pub type ClientMessage {
-  SubmitTestRun(run: TestRun)
-  SubmitFullTestRun(run: FullTestRun)
+  SubmitSample(run_id: String, sample: Sample)
+  SubmitFullSample(run_id: String, sample: FullSample)
   SetSelection(selected_nodes: List(String))
   ClearSelectionQuery
-  RequestRunDetail(id: Int)
+  RequestSampleDetail(id: Int)
+  ListRuns
+  SelectRun(run_id: String)
 }
 
 // === Encoders ===
 
-fn encode_test_run_fields(run: TestRun) -> List(#(String, json.Json)) {
+fn encode_sample_fields(sample: Sample) -> List(#(String, json.Json)) {
   [
-    #("force", json.float(run.force)),
-    #("duration", json.float(run.duration)),
-    #("winning_number", json.int(run.winning_number)),
-    #("color", json.string(run.color)),
+    #("force", json.float(sample.force)),
+    #("duration", json.float(sample.duration)),
+    #("winning_number", json.int(sample.winning_number)),
+    #("color", json.string(sample.color)),
   ]
 }
 
-fn encode_full_test_run_fields(
-  run: FullTestRun,
+fn encode_full_sample_fields(
+  sample: FullSample,
 ) -> List(#(String, json.Json)) {
   [
-    #("force", json.float(run.force)),
-    #("duration", json.float(run.duration)),
-    #("winning_number", json.int(run.winning_number)),
-    #("color", json.string(run.color)),
-    #("start_date", json.string(run.start_date)),
-    #("end_date", json.string(run.end_date)),
-    #("status", json.string(run.status)),
-    #("logs", json.array(run.logs, json.string)),
-    #("gherkin_text", json.string(run.gherkin_text)),
+    #("force", json.float(sample.force)),
+    #("duration", json.float(sample.duration)),
+    #("winning_number", json.int(sample.winning_number)),
+    #("color", json.string(sample.color)),
+    #("start_date", json.string(sample.start_date)),
+    #("end_date", json.string(sample.end_date)),
+    #("status", json.string(sample.status)),
+    #("logs", json.array(sample.logs, json.string)),
+    #("gherkin_text", json.string(sample.gherkin_text)),
     #(
       "step_metrics",
-      json.array(run.step_metrics, encode_step_metric),
+      json.array(sample.step_metrics, encode_step_metric),
     ),
   ]
 }
@@ -158,16 +166,24 @@ fn encode_stats(stats: Stats) -> List(#(String, json.Json)) {
   ]
 }
 
-fn encode_run_summary(rs: RunSummary) -> json.Json {
-  json.object([
-    #("id", json.int(rs.id)),
-    #("start_date", json.string(rs.start_date)),
-    #("end_date", json.string(rs.end_date)),
-    #("status", json.string(rs.status)),
-  ])
+fn encode_sample_summary(ss: SampleSummary) -> json.Json {
+  json.object(encode_sample_summary_fields(ss))
 }
 
-fn encode_run_detail_fields(d: RunDetail) -> List(#(String, json.Json)) {
+fn encode_sample_summary_fields(
+  ss: SampleSummary,
+) -> List(#(String, json.Json)) {
+  [
+    #("id", json.int(ss.id)),
+    #("start_date", json.string(ss.start_date)),
+    #("end_date", json.string(ss.end_date)),
+    #("status", json.string(ss.status)),
+  ]
+}
+
+fn encode_sample_detail_fields(
+  d: SampleDetail,
+) -> List(#(String, json.Json)) {
   [
     #("id", json.int(d.id)),
     #("force", json.float(d.force)),
@@ -187,6 +203,18 @@ fn encode_run_detail_fields(d: RunDetail) -> List(#(String, json.Json)) {
   ]
 }
 
+fn encode_run_info(info: RunInfo) -> json.Json {
+  json.object(encode_run_info_fields(info))
+}
+
+fn encode_run_info_fields(info: RunInfo) -> List(#(String, json.Json)) {
+  [
+    #("run_id", json.string(info.run_id)),
+    #("created_at", json.string(info.created_at)),
+    #("sample_count", json.int(info.sample_count)),
+  ]
+}
+
 pub fn encode_server_message(msg: ServerMessage) -> String {
   case msg {
     StatsSnapshot(stats) ->
@@ -194,55 +222,58 @@ pub fn encode_server_message(msg: ServerMessage) -> String {
         #("type", json.string("stats_snapshot")),
         ..encode_stats(stats)
       ])
-    MatchingRuns(runs) ->
+    MatchingSamples(samples) ->
       json.object([
-        #("type", json.string("matching_runs")),
-        #("runs", json.array(runs, encode_run_summary)),
+        #("type", json.string("matching_samples")),
+        #("samples", json.array(samples, encode_sample_summary)),
       ])
-    MatchingRunAppend(run) ->
+    MatchingSampleAppend(sample) ->
       json.object([
-        #("type", json.string("matching_run_append")),
-        ..encode_run_summary_fields(run)
+        #("type", json.string("matching_sample_append")),
+        ..encode_sample_summary_fields(sample)
       ])
-    AllRuns(runs) ->
+    AllSamples(samples) ->
       json.object([
-        #("type", json.string("all_runs")),
-        #("runs", json.array(runs, encode_run_summary)),
+        #("type", json.string("all_samples")),
+        #("samples", json.array(samples, encode_sample_summary)),
       ])
-    NewRun(run) ->
+    NewSample(sample) ->
       json.object([
-        #("type", json.string("new_run")),
-        ..encode_run_summary_fields(run)
+        #("type", json.string("new_sample")),
+        ..encode_sample_summary_fields(sample)
       ])
-    RunDetailResponse(detail) ->
+    SampleDetailResponse(detail) ->
       json.object([
-        #("type", json.string("run_detail")),
-        ..encode_run_detail_fields(detail)
+        #("type", json.string("sample_detail")),
+        ..encode_sample_detail_fields(detail)
+      ])
+    RunList(runs) ->
+      json.object([
+        #("type", json.string("run_list")),
+        #("runs", json.array(runs, encode_run_info)),
+      ])
+    RunCreated(run) ->
+      json.object([
+        #("type", json.string("run_created")),
+        ..encode_run_info_fields(run)
       ])
   }
   |> json.to_string
 }
 
-fn encode_run_summary_fields(rs: RunSummary) -> List(#(String, json.Json)) {
-  [
-    #("id", json.int(rs.id)),
-    #("start_date", json.string(rs.start_date)),
-    #("end_date", json.string(rs.end_date)),
-    #("status", json.string(rs.status)),
-  ]
-}
-
 pub fn encode_client_message(msg: ClientMessage) -> String {
   case msg {
-    SubmitTestRun(run) ->
+    SubmitSample(run_id, sample) ->
       json.object([
-        #("type", json.string("submit_test_run")),
-        ..encode_test_run_fields(run)
+        #("type", json.string("submit_sample")),
+        #("run_id", json.string(run_id)),
+        ..encode_sample_fields(sample)
       ])
-    SubmitFullTestRun(run) ->
+    SubmitFullSample(run_id, sample) ->
       json.object([
-        #("type", json.string("submit_full_test_run")),
-        ..encode_full_test_run_fields(run)
+        #("type", json.string("submit_full_sample")),
+        #("run_id", json.string(run_id)),
+        ..encode_full_sample_fields(sample)
       ])
     SetSelection(nodes) ->
       json.object([
@@ -251,10 +282,17 @@ pub fn encode_client_message(msg: ClientMessage) -> String {
       ])
     ClearSelectionQuery ->
       json.object([#("type", json.string("clear_selection_query"))])
-    RequestRunDetail(id) ->
+    RequestSampleDetail(id) ->
       json.object([
-        #("type", json.string("request_run_detail")),
+        #("type", json.string("request_sample_detail")),
         #("id", json.int(id)),
+      ])
+    ListRuns ->
+      json.object([#("type", json.string("list_runs"))])
+    SelectRun(run_id) ->
+      json.object([
+        #("type", json.string("select_run")),
+        #("run_id", json.string(run_id)),
       ])
   }
   |> json.to_string
@@ -262,19 +300,19 @@ pub fn encode_client_message(msg: ClientMessage) -> String {
 
 // === Decoders ===
 
-fn test_run_decoder() -> decode.Decoder(TestRun) {
+fn sample_decoder() -> decode.Decoder(Sample) {
   decode.field("force", decode.float, fn(force) {
     decode.field("duration", decode.float, fn(duration) {
       decode.field("winning_number", decode.int, fn(winning_number) {
         decode.field("color", decode.string, fn(color) {
-          decode.success(TestRun(force:, duration:, winning_number:, color:))
+          decode.success(Sample(force:, duration:, winning_number:, color:))
         })
       })
     })
   })
 }
 
-fn full_test_run_decoder() -> decode.Decoder(FullTestRun) {
+fn full_sample_decoder() -> decode.Decoder(FullSample) {
   decode.field("force", decode.float, fn(force) {
     decode.field("duration", decode.float, fn(duration) {
       decode.field("winning_number", decode.int, fn(winning_number) {
@@ -294,7 +332,7 @@ fn full_test_run_decoder() -> decode.Decoder(FullTestRun) {
                           "step_metrics",
                           decode.list(step_metric_decoder()),
                           fn(step_metrics) {
-                            decode.success(FullTestRun(
+                            decode.success(FullSample(
                               force:,
                               duration:,
                               winning_number:,
@@ -388,19 +426,19 @@ fn stats_decoder() -> decode.Decoder(Stats) {
   })
 }
 
-fn run_summary_decoder() -> decode.Decoder(RunSummary) {
+fn sample_summary_decoder() -> decode.Decoder(SampleSummary) {
   decode.field("id", decode.int, fn(id) {
     decode.field("start_date", decode.string, fn(start_date) {
       decode.field("end_date", decode.string, fn(end_date) {
         decode.field("status", decode.string, fn(status) {
-          decode.success(RunSummary(id:, start_date:, end_date:, status:))
+          decode.success(SampleSummary(id:, start_date:, end_date:, status:))
         })
       })
     })
   })
 }
 
-fn run_detail_decoder() -> decode.Decoder(RunDetail) {
+fn sample_detail_decoder() -> decode.Decoder(SampleDetail) {
   decode.field("id", decode.int, fn(id) {
     decode.field("force", decode.float, fn(force) {
       decode.field("duration", decode.float, fn(duration) {
@@ -437,7 +475,7 @@ fn run_detail_decoder() -> decode.Decoder(RunDetail) {
                                             "color_label",
                                             decode.string,
                                             fn(color_label) {
-                                              decode.success(RunDetail(
+                                              decode.success(SampleDetail(
                                                 id:,
                                                 force:,
                                                 duration:,
@@ -478,26 +516,45 @@ fn run_detail_decoder() -> decode.Decoder(RunDetail) {
   })
 }
 
+fn run_info_decoder() -> decode.Decoder(RunInfo) {
+  decode.field("run_id", decode.string, fn(run_id) {
+    decode.field("created_at", decode.string, fn(created_at) {
+      decode.field("sample_count", decode.int, fn(sample_count) {
+        decode.success(RunInfo(run_id:, created_at:, sample_count:))
+      })
+    })
+  })
+}
+
 pub fn server_message_decoder() -> decode.Decoder(ServerMessage) {
   use tag <- decode.then(decode.at(["type"], decode.string))
   case tag {
     "stats_snapshot" -> stats_decoder() |> decode.map(StatsSnapshot)
-    "matching_runs" ->
+    "matching_samples" ->
+      decode.field(
+        "samples",
+        decode.list(sample_summary_decoder()),
+        fn(samples) { decode.success(MatchingSamples(samples)) },
+      )
+    "matching_sample_append" ->
+      sample_summary_decoder() |> decode.map(MatchingSampleAppend)
+    "all_samples" ->
+      decode.field(
+        "samples",
+        decode.list(sample_summary_decoder()),
+        fn(samples) { decode.success(AllSamples(samples)) },
+      )
+    "new_sample" -> sample_summary_decoder() |> decode.map(NewSample)
+    "sample_detail" ->
+      sample_detail_decoder() |> decode.map(SampleDetailResponse)
+    "run_list" ->
       decode.field(
         "runs",
-        decode.list(run_summary_decoder()),
-        fn(runs) { decode.success(MatchingRuns(runs)) },
+        decode.list(run_info_decoder()),
+        fn(runs) { decode.success(RunList(runs)) },
       )
-    "matching_run_append" ->
-      run_summary_decoder() |> decode.map(MatchingRunAppend)
-    "all_runs" ->
-      decode.field(
-        "runs",
-        decode.list(run_summary_decoder()),
-        fn(runs) { decode.success(AllRuns(runs)) },
-      )
-    "new_run" -> run_summary_decoder() |> decode.map(NewRun)
-    "run_detail" -> run_detail_decoder() |> decode.map(RunDetailResponse)
+    "run_created" ->
+      run_info_decoder() |> decode.map(RunCreated)
     _ ->
       decode.failure(
         StatsSnapshot(Stats(
@@ -516,9 +573,16 @@ pub fn server_message_decoder() -> decode.Decoder(ServerMessage) {
 pub fn client_message_decoder() -> decode.Decoder(ClientMessage) {
   use tag <- decode.then(decode.at(["type"], decode.string))
   case tag {
-    "submit_test_run" -> test_run_decoder() |> decode.map(SubmitTestRun)
-    "submit_full_test_run" ->
-      full_test_run_decoder() |> decode.map(SubmitFullTestRun)
+    "submit_sample" ->
+      decode.field("run_id", decode.string, fn(run_id) {
+        sample_decoder()
+        |> decode.map(fn(sample) { SubmitSample(run_id, sample) })
+      })
+    "submit_full_sample" ->
+      decode.field("run_id", decode.string, fn(run_id) {
+        full_sample_decoder()
+        |> decode.map(fn(sample) { SubmitFullSample(run_id, sample) })
+      })
     "set_selection" ->
       decode.field(
         "selected_nodes",
@@ -526,13 +590,18 @@ pub fn client_message_decoder() -> decode.Decoder(ClientMessage) {
         fn(nodes) { decode.success(SetSelection(nodes)) },
       )
     "clear_selection_query" -> decode.success(ClearSelectionQuery)
-    "request_run_detail" ->
+    "request_sample_detail" ->
       decode.field("id", decode.int, fn(id) {
-        decode.success(RequestRunDetail(id))
+        decode.success(RequestSampleDetail(id))
+      })
+    "list_runs" -> decode.success(ListRuns)
+    "select_run" ->
+      decode.field("run_id", decode.string, fn(run_id) {
+        decode.success(SelectRun(run_id))
       })
     _ ->
       decode.failure(
-        SubmitTestRun(TestRun(0.0, 0.0, 0, "")),
+        SubmitSample("", Sample(0.0, 0.0, 0, "")),
         "ClientMessage",
       )
   }

@@ -9,6 +9,7 @@ import asyncio
 import json
 import random
 import sys
+import uuid
 from datetime import datetime, timezone
 
 import websockets
@@ -135,7 +136,7 @@ def generate_run(unfair: bool) -> dict:
     )
 
     return {
-        "type": "submit_full_test_run",
+        "type": "submit_full_sample",
         "force": force,
         "duration": duration,
         "winning_number": winning_number,
@@ -161,8 +162,10 @@ async def drain(ws):
 async def run(args):
     url = args.url
     delay = 1.0 / args.rate
+    run_id = args.run_id or str(uuid.uuid4())
 
     mode = "UNFAIR" if args.unfair else "FAIR"
+    print(f"Run ID: {run_id}")
     print(f"Connecting to {url}...")
     if args.unfair:
         print("*** UNFAIR ROULETTE MODE ***")
@@ -174,6 +177,7 @@ async def run(args):
         count = 0
         while args.count == 0 or count < args.count:
             msg = generate_run(unfair=args.unfair)
+            msg["run_id"] = run_id
             await ws.send(json.dumps(msg))
             count += 1
             if count % 10 == 0:
@@ -195,6 +199,10 @@ def main():
     parser.add_argument(
         "--count", type=int, default=0,
         help="Total runs to send, 0 for infinite (default: 0)",
+    )
+    parser.add_argument(
+        "--run-id", type=str, default=None,
+        help="Test run UUID (default: auto-generated)",
     )
     parser.add_argument(
         "--url", type=str, default="ws://localhost:8080/ws",

@@ -3,6 +3,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 import lustre
 import lustre/attribute
 import lustre/effect
@@ -12,7 +13,8 @@ import lustre/event
 import lustre_websocket as ws
 import shared/classify
 import shared/messages.{
-  type RunDetail, type RunSummary, type Stats, type StepMetric,
+  type RunInfo, type SampleDetail, type SampleSummary, type Stats,
+  type StepMetric,
 }
 
 // === FFI ===
@@ -43,9 +45,11 @@ pub type Model {
     expanded_steps: List(Int),
     selected_nodes: List(String),
     active_tab: Tab,
-    runs: List(RunSummary),
-    expanded_run_id: Option(Int),
-    run_detail: Option(RunDetail),
+    samples: List(SampleSummary),
+    expanded_sample_id: Option(Int),
+    sample_detail: Option(SampleDetail),
+    runs: List(RunInfo),
+    selected_run_id: Option(String),
   )
 }
 
@@ -57,8 +61,9 @@ pub type Msg {
   ToggleNode(node: String, depth: Int, ctrl: Bool)
   ClearSelection
   SwitchTab(Tab)
-  ClickRun(Int)
-  CollapseRun
+  ClickSample(Int)
+  CollapseSample
+  SelectRun(run_id: String)
 }
 
 // === Init ===
@@ -71,9 +76,11 @@ fn init(_flags) -> #(Model, effect.Effect(Msg)) {
       expanded_steps: [],
       selected_nodes: [],
       active_tab: SankeyTab,
+      samples: [],
+      expanded_sample_id: None,
+      sample_detail: None,
       runs: [],
-      expanded_run_id: None,
-      run_detail: None,
+      selected_run_id: None,
     )
   #(model, ws.init("/ws", WsEvent))
 }
@@ -150,36 +157,51 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
           let new_model = Model(..model, stats: Some(stats))
           #(new_model, update_chart(stats))
         }
-        Ok(messages.AllRuns(runs)) -> {
+        Ok(messages.AllSamples(samples)) -> {
           #(
             Model(
               ..model,
-              runs: runs,
-              expanded_run_id: None,
-              run_detail: None,
+              samples: samples,
+              expanded_sample_id: None,
+              sample_detail: None,
             ),
             effect.none(),
           )
         }
-        Ok(messages.MatchingRuns(runs)) -> {
+        Ok(messages.MatchingSamples(samples)) -> {
           #(
             Model(
               ..model,
-              runs: runs,
-              expanded_run_id: None,
-              run_detail: None,
+              samples: samples,
+              expanded_sample_id: None,
+              sample_detail: None,
             ),
             effect.none(),
           )
         }
-        Ok(messages.MatchingRunAppend(run)) -> {
-          #(Model(..model, runs: [run, ..model.runs]), effect.none())
+        Ok(messages.MatchingSampleAppend(sample)) -> {
+          #(
+            Model(..model, samples: [sample, ..model.samples]),
+            effect.none(),
+          )
         }
-        Ok(messages.NewRun(run)) -> {
-          #(Model(..model, runs: [run, ..model.runs]), effect.none())
+        Ok(messages.NewSample(sample)) -> {
+          #(
+            Model(..model, samples: [sample, ..model.samples]),
+            effect.none(),
+          )
         }
-        Ok(messages.RunDetailResponse(detail)) -> {
-          #(Model(..model, run_detail: Some(detail)), effect.none())
+        Ok(messages.SampleDetailResponse(detail)) -> {
+          #(Model(..model, sample_detail: Some(detail)), effect.none())
+        }
+        Ok(messages.RunList(runs)) -> {
+          #(Model(..model, runs: runs), effect.none())
+        }
+        Ok(messages.RunCreated(run)) -> {
+          #(
+            Model(..model, runs: [run, ..model.runs]),
+            effect.none(),
+          )
         }
         Error(_) -> #(model, effect.none())
       }
@@ -270,28 +292,49 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
       #(Model(..model, active_tab: tab), eff)
     }
 
-    ClickRun(id) -> {
-      case model.expanded_run_id {
+    ClickSample(id) -> {
+      case model.expanded_sample_id {
         Some(current_id) if current_id == id -> {
           #(
-            Model(..model, expanded_run_id: None, run_detail: None),
+            Model(..model, expanded_sample_id: None, sample_detail: None),
             effect.none(),
           )
         }
         _ -> {
           let new_model =
-            Model(..model, expanded_run_id: Some(id), run_detail: None)
-          let eff = ws_send(model.socket, messages.RequestRunDetail(id))
+            Model(..model, expanded_sample_id: Some(id), sample_detail: None)
+          let eff =
+            ws_send(model.socket, messages.RequestSampleDetail(id))
           #(new_model, eff)
         }
       }
     }
 
-    CollapseRun -> {
+    CollapseSample -> {
       #(
-        Model(..model, expanded_run_id: None, run_detail: None),
+        Model(..model, expanded_sample_id: None, sample_detail: None),
         effect.none(),
       )
+    }
+
+    SelectRun(run_id) -> {
+      let new_model =
+        Model(
+          ..model,
+          selected_run_id: Some(run_id),
+          stats: None,
+          samples: [],
+          expanded_sample_id: None,
+          sample_detail: None,
+          selected_nodes: [],
+          expanded_steps: [],
+        )
+      let eff =
+        effect.batch([
+          ws_send(model.socket, messages.SelectRun(run_id)),
+          effect.from(fn(_d) { do_clear_highlight() }),
+        ])
+      #(new_model, eff)
     }
   }
 }
@@ -301,7 +344,95 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
 fn view(model: Model) -> Element(Msg) {
   html.div(
     [attribute.class("flex h-screen bg-gray-50 text-gray-900 font-sans")],
-    [view_gherkin(model), view_right_panel(model)],
+    [
+      view_sidebar(model),
+      case model.selected_run_id {
+        Some(_) ->
+          html.div(
+            [attribute.class("flex flex-1 min-w-0")],
+            [view_gherkin(model), view_right_panel(model)],
+          )
+        None ->
+          html.div(
+            [
+              attribute.class(
+                "flex-1 flex items-center justify-center text-gray-400 text-lg",
+              ),
+            ],
+            [text("Select a run from the sidebar")],
+          )
+      },
+    ],
+  )
+}
+
+fn truncate_id(id: String) -> String {
+  case string.length(id) > 8 {
+    True -> string.slice(id, 0, 8) <> "..."
+    False -> id
+  }
+}
+
+fn view_sidebar(model: Model) -> Element(Msg) {
+  html.div(
+    [
+      attribute.class(
+        "w-52 bg-white border-r border-gray-200 flex flex-col overflow-y-auto",
+      ),
+    ],
+    [
+      html.div(
+        [
+          attribute.class(
+            "px-3 py-3 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider",
+          ),
+        ],
+        [text("Runs")],
+      ),
+      html.div(
+        [attribute.class("flex-1 overflow-y-auto")],
+        case model.runs {
+          [] ->
+            [
+              html.div(
+                [attribute.class("px-3 py-4 text-xs text-gray-400")],
+                [text("No runs yet")],
+              ),
+            ]
+          runs ->
+            list.map(runs, fn(run) {
+              let is_selected = model.selected_run_id == Some(run.run_id)
+              html.button(
+                [
+                  attribute.class(
+                    "w-full text-left px-3 py-2 text-xs border-b border-gray-100 transition-colors "
+                    <> case is_selected {
+                      True -> "bg-indigo-50 border-l-2 border-l-indigo-500"
+                      False -> "hover:bg-gray-50"
+                    },
+                  ),
+                  event.on_click(SelectRun(run.run_id)),
+                ],
+                [
+                  html.div(
+                    [attribute.class("font-mono font-medium text-gray-700")],
+                    [text(truncate_id(run.run_id))],
+                  ),
+                  html.div(
+                    [attribute.class("text-gray-400 mt-0.5")],
+                    [
+                      text(
+                        int.to_string(run.sample_count)
+                        <> " samples",
+                      ),
+                    ],
+                  ),
+                ],
+              )
+            })
+        },
+      ),
+    ],
   )
 }
 
@@ -650,19 +781,17 @@ fn depth_label(depth: Int) -> String {
 
 fn view_right_panel(model: Model) -> Element(Msg) {
   html.div([attribute.class("flex-1 flex flex-col min-w-0 p-4")], [
-    // Tab bar
     html.div(
       [attribute.class("flex border-b border-gray-200 mb-3")],
       [
         tab_button("Sankey", SankeyTab, model.active_tab),
         tab_button(
-          "Runs (" <> int.to_string(list.length(model.runs)) <> ")",
+          "Samples (" <> int.to_string(list.length(model.samples)) <> ")",
           TableTab,
           model.active_tab,
         ),
       ],
     ),
-    // Tab content
     case model.active_tab {
       SankeyTab -> view_sankey_content()
       TableTab -> view_table_content(model)
@@ -711,27 +840,25 @@ fn view_sankey_content() -> Element(Msg) {
 
 fn view_table_content(model: Model) -> Element(Msg) {
   html.div([attribute.class("flex-1 flex flex-col min-h-0 overflow-hidden")], [
-    // Table
     html.div([attribute.class("flex-1 overflow-y-auto")], [
-      case model.runs {
+      case model.samples {
         [] ->
           html.div(
             [attribute.class("text-center text-gray-400 py-12")],
-            [text("No runs yet")],
+            [text("No samples yet")],
           )
-        runs -> view_runs_table(runs, model)
+        samples -> view_samples_table(samples, model)
       },
     ]),
-    // Detail panel
-    case model.expanded_run_id {
+    case model.expanded_sample_id {
       Some(_) -> view_detail_panel(model)
       None -> element.none()
     },
   ])
 }
 
-fn view_runs_table(
-  runs: List(RunSummary),
+fn view_samples_table(
+  samples: List(SampleSummary),
   model: Model,
 ) -> Element(Msg) {
   html.table(
@@ -754,14 +881,14 @@ fn view_runs_table(
       ]),
       html.tbody(
         [],
-        list.map(runs, fn(run) { view_run_row(run, model) }),
+        list.map(samples, fn(sample) { view_sample_row(sample, model) }),
       ),
     ],
   )
 }
 
-fn view_run_row(run: RunSummary, model: Model) -> Element(Msg) {
-  let is_expanded = model.expanded_run_id == Some(run.id)
+fn view_sample_row(sample: SampleSummary, model: Model) -> Element(Msg) {
+  let is_expanded = model.expanded_sample_id == Some(sample.id)
   html.tr(
     [
       attribute.class(
@@ -771,23 +898,23 @@ fn view_run_row(run: RunSummary, model: Model) -> Element(Msg) {
           False -> "hover:bg-gray-50"
         },
       ),
-      event.on_click(ClickRun(run.id)),
+      event.on_click(ClickSample(sample.id)),
     ],
     [
       html.td(
         [attribute.class("px-3 py-2 font-mono text-xs text-gray-600")],
-        [text(int.to_string(run.id))],
+        [text(int.to_string(sample.id))],
       ),
       html.td(
         [attribute.class("px-3 py-2 text-xs text-gray-600")],
-        [text(format_date(run.start_date))],
+        [text(format_date(sample.start_date))],
       ),
       html.td(
         [attribute.class("px-3 py-2 text-xs text-gray-600")],
-        [text(format_date(run.end_date))],
+        [text(format_date(sample.end_date))],
       ),
       html.td([attribute.class("px-3 py-2")], [
-        status_badge(run.status),
+        status_badge(sample.status),
       ]),
     ],
   )
@@ -820,26 +947,25 @@ fn view_detail_panel(model: Model) -> Element(Msg) {
       ),
     ],
     [
-      case model.run_detail {
+      case model.sample_detail {
         None ->
           html.div(
             [attribute.class("text-center text-gray-400 py-4")],
             [text("Loading...")],
           )
-        Some(detail) -> view_run_detail(detail)
+        Some(detail) -> view_sample_detail(detail)
       },
     ],
   )
 }
 
-fn view_run_detail(detail: RunDetail) -> Element(Msg) {
+fn view_sample_detail(detail: SampleDetail) -> Element(Msg) {
   html.div([attribute.class("space-y-4")], [
-    // Header
     html.div(
       [attribute.class("flex items-center justify-between")],
       [
         html.h3([attribute.class("text-sm font-bold text-gray-700")], [
-          text("Run #" <> int.to_string(detail.id)),
+          text("Sample #" <> int.to_string(detail.id)),
         ]),
         html.div([attribute.class("flex gap-2")], [
           status_badge(detail.status),
@@ -848,14 +974,13 @@ fn view_run_detail(detail: RunDetail) -> Element(Msg) {
               attribute.class(
                 "text-xs text-gray-400 hover:text-gray-600 ml-2",
               ),
-              event.on_click(CollapseRun),
+              event.on_click(CollapseSample),
             ],
             [text("Close")],
           ),
         ]),
       ],
     ),
-    // Metadata
     html.div(
       [attribute.class("grid grid-cols-2 gap-2 text-xs")],
       [
@@ -865,7 +990,6 @@ fn view_run_detail(detail: RunDetail) -> Element(Msg) {
         detail_field("Color", detail.color <> " (" <> detail.color_label <> ")"),
       ],
     ),
-    // Gherkin
     case detail.gherkin_text {
       "" -> element.none()
       gherkin ->
@@ -888,7 +1012,6 @@ fn view_run_detail(detail: RunDetail) -> Element(Msg) {
           ),
         ])
     },
-    // Step metrics
     case detail.step_metrics {
       [] -> element.none()
       metrics ->
@@ -904,7 +1027,6 @@ fn view_run_detail(detail: RunDetail) -> Element(Msg) {
           view_step_metrics_table(metrics),
         ])
     },
-    // Logs
     case detail.logs {
       [] -> element.none()
       logs ->

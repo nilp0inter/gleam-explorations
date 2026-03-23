@@ -2,22 +2,35 @@ import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/list
 import gleam/otp/actor
+import gleam/set.{type Set}
 import gleam/string
 import server/cubdb_ffi.{type Db}
 import server/db
 import shared/classify
-import shared/messages.{type FullTestRun, type TestRun}
+import shared/messages.{type FullSample, type Sample}
 
 const flush_interval_ms = 200
 
-// Keys for persisted stats
+// Keys for persisted stats (per run_id)
 pub type StatsKey {
-  TotalKey
-  ForceCounts
-  DurationCounts
-  NumberCounts
-  ColorCounts
-  LinkCounts
+  TotalKey(run_id: String)
+  ForceCounts(run_id: String)
+  DurationCounts(run_id: String)
+  NumberCounts(run_id: String)
+  ColorCounts(run_id: String)
+  LinkCounts(run_id: String)
+  StatsRunIdsKey
+}
+
+pub type RunStats {
+  RunStats(
+    total: Int,
+    force_counts: Dict(String, Int),
+    duration_counts: Dict(String, Int),
+    number_counts: Dict(String, Int),
+    color_counts: Dict(String, Int),
+    link_counts: Dict(String, Int),
+  )
 }
 
 pub type State {
@@ -26,23 +39,31 @@ pub type State {
     connected_clients: List(Subject(String)),
     db_actor: Subject(db.Msg),
     stats_db: Db,
-    total: Int,
-    force_counts: Dict(String, Int),
-    duration_counts: Dict(String, Int),
-    number_counts: Dict(String, Int),
-    color_counts: Dict(String, Int),
-    link_counts: Dict(String, Int),
-    dirty: Bool,
+    run_stats: Dict(String, RunStats),
+    dirty_runs: Set(String),
     flush_scheduled: Bool,
+    client_run_selection: Dict(Subject(String), String),
   )
 }
 
 pub type Msg {
   ClientConnected(client: Subject(String))
   ClientDisconnected(client: Subject(String))
-  IngestTestRun(run: TestRun)
-  IngestFullTestRun(run: FullTestRun)
+  IngestSample(run_id: String, sample: Sample)
+  IngestFullSample(run_id: String, sample: FullSample)
+  ClientSelectRun(client: Subject(String), run_id: String)
   Flush
+}
+
+fn empty_run_stats() -> RunStats {
+  RunStats(
+    total: 0,
+    force_counts: dict.new(),
+    duration_counts: dict.new(),
+    number_counts: dict.new(),
+    color_counts: dict.new(),
+    link_counts: dict.new(),
+  )
 }
 
 pub fn start(
@@ -53,50 +74,66 @@ pub fn start(
     actor.new_with_initialiser(5000, fn(subject) {
       let assert Ok(stats_db) = cubdb_ffi.start_link(stats_data_dir)
 
-      // Load persisted counters
-      let total: Int = case cubdb_ffi.get(stats_db, TotalKey) {
-        Ok(n) -> n
-        Error(_) -> 0
-      }
-      let force_counts: Dict(String, Int) =
-        case cubdb_ffi.get(stats_db, ForceCounts) {
-          Ok(d) -> d
-          Error(_) -> dict.new()
+      let run_ids: List(String) =
+        case cubdb_ffi.get(stats_db, StatsRunIdsKey) {
+          Ok(ids) -> ids
+          Error(_) -> []
         }
-      let duration_counts: Dict(String, Int) =
-        case cubdb_ffi.get(stats_db, DurationCounts) {
-          Ok(d) -> d
-          Error(_) -> dict.new()
-        }
-      let number_counts: Dict(String, Int) =
-        case cubdb_ffi.get(stats_db, NumberCounts) {
-          Ok(d) -> d
-          Error(_) -> dict.new()
-        }
-      let color_counts: Dict(String, Int) =
-        case cubdb_ffi.get(stats_db, ColorCounts) {
-          Ok(d) -> d
-          Error(_) -> dict.new()
-        }
-      let link_counts: Dict(String, Int) =
-        case cubdb_ffi.get(stats_db, LinkCounts) {
-          Ok(d) -> d
-          Error(_) -> dict.new()
-        }
+
+      let run_stats =
+        list.fold(run_ids, dict.new(), fn(acc, run_id) {
+          let total: Int = case cubdb_ffi.get(stats_db, TotalKey(run_id)) {
+            Ok(n) -> n
+            Error(_) -> 0
+          }
+          let force_counts: Dict(String, Int) =
+            case cubdb_ffi.get(stats_db, ForceCounts(run_id)) {
+              Ok(d) -> d
+              Error(_) -> dict.new()
+            }
+          let duration_counts: Dict(String, Int) =
+            case cubdb_ffi.get(stats_db, DurationCounts(run_id)) {
+              Ok(d) -> d
+              Error(_) -> dict.new()
+            }
+          let number_counts: Dict(String, Int) =
+            case cubdb_ffi.get(stats_db, NumberCounts(run_id)) {
+              Ok(d) -> d
+              Error(_) -> dict.new()
+            }
+          let color_counts: Dict(String, Int) =
+            case cubdb_ffi.get(stats_db, ColorCounts(run_id)) {
+              Ok(d) -> d
+              Error(_) -> dict.new()
+            }
+          let link_counts: Dict(String, Int) =
+            case cubdb_ffi.get(stats_db, LinkCounts(run_id)) {
+              Ok(d) -> d
+              Error(_) -> dict.new()
+            }
+          dict.insert(
+            acc,
+            run_id,
+            RunStats(
+              total:,
+              force_counts:,
+              duration_counts:,
+              number_counts:,
+              color_counts:,
+              link_counts:,
+            ),
+          )
+        })
 
       actor.initialised(State(
         self: subject,
         connected_clients: [],
         db_actor: db_actor,
         stats_db: stats_db,
-        total: total,
-        force_counts: force_counts,
-        duration_counts: duration_counts,
-        number_counts: number_counts,
-        color_counts: color_counts,
-        link_counts: link_counts,
-        dirty: False,
+        run_stats: run_stats,
+        dirty_runs: set.new(),
         flush_scheduled: False,
+        client_run_selection: dict.new(),
       ))
       |> actor.returning(subject)
       |> Ok
@@ -138,37 +175,71 @@ fn dict_to_sankey_links(
   })
 }
 
-fn build_stats(state: State) -> messages.Stats {
+fn build_stats_from_run_stats(rs: RunStats) -> messages.Stats {
   messages.Stats(
-    total: state.total,
-    force_counts: dict_to_bucket_counts(state.force_counts),
-    duration_counts: dict_to_bucket_counts(state.duration_counts),
-    number_counts: dict_to_bucket_counts(state.number_counts),
-    color_counts: dict_to_bucket_counts(state.color_counts),
-    links: dict_to_sankey_links(state.link_counts),
+    total: rs.total,
+    force_counts: dict_to_bucket_counts(rs.force_counts),
+    duration_counts: dict_to_bucket_counts(rs.duration_counts),
+    number_counts: dict_to_bucket_counts(rs.number_counts),
+    color_counts: dict_to_bucket_counts(rs.color_counts),
+    links: dict_to_sankey_links(rs.link_counts),
   )
 }
 
-fn broadcast_stats(state: State) -> Nil {
-  let stats = build_stats(state)
+fn empty_stats() -> messages.Stats {
+  messages.Stats(
+    total: 0,
+    force_counts: [],
+    duration_counts: [],
+    number_counts: [],
+    color_counts: [],
+    links: [],
+  )
+}
+
+fn broadcast_stats_for_run(state: State, run_id: String) -> Nil {
+  let stats = case dict.get(state.run_stats, run_id) {
+    Ok(rs) -> build_stats_from_run_stats(rs)
+    Error(_) -> empty_stats()
+  }
   let json =
     messages.encode_server_message(messages.StatsSnapshot(stats))
-  list.each(state.connected_clients, fn(client) {
-    process.send(client, json)
-  })
+  let _ =
+    dict.each(state.client_run_selection, fn(client, crid) {
+      case crid == run_id {
+        True -> process.send(client, json)
+        False -> Nil
+      }
+    })
+  Nil
 }
 
-fn persist_stats(state: State) -> Nil {
-  cubdb_ffi.put(state.stats_db, TotalKey, state.total)
-  cubdb_ffi.put(state.stats_db, ForceCounts, state.force_counts)
-  cubdb_ffi.put(state.stats_db, DurationCounts, state.duration_counts)
-  cubdb_ffi.put(state.stats_db, NumberCounts, state.number_counts)
-  cubdb_ffi.put(state.stats_db, ColorCounts, state.color_counts)
-  cubdb_ffi.put(state.stats_db, LinkCounts, state.link_counts)
+fn persist_stats_for_run(state: State, run_id: String) -> Nil {
+  case dict.get(state.run_stats, run_id) {
+    Ok(rs) -> {
+      cubdb_ffi.put(state.stats_db, TotalKey(run_id), rs.total)
+      cubdb_ffi.put(state.stats_db, ForceCounts(run_id), rs.force_counts)
+      cubdb_ffi.put(
+        state.stats_db,
+        DurationCounts(run_id),
+        rs.duration_counts,
+      )
+      cubdb_ffi.put(state.stats_db, NumberCounts(run_id), rs.number_counts)
+      cubdb_ffi.put(state.stats_db, ColorCounts(run_id), rs.color_counts)
+      cubdb_ffi.put(state.stats_db, LinkCounts(run_id), rs.link_counts)
+    }
+    Error(_) -> Nil
+  }
 }
 
-fn ingest_run_common(
+fn save_run_ids(state: State) -> Nil {
+  let run_ids = dict.keys(state.run_stats)
+  cubdb_ffi.put(state.stats_db, StatsRunIdsKey, run_ids)
+}
+
+fn ingest_sample_common(
   state: State,
+  run_id: String,
   force: Float,
   duration: Float,
   winning_number: Int,
@@ -179,20 +250,29 @@ fn ingest_run_common(
   let number_label = classify.classify_number(winning_number)
   let color_label = classify.classify_color(color)
 
-  let new_state =
-    State(
-      ..state,
-      total: state.total + 1,
-      force_counts: increment(state.force_counts, force_label),
-      duration_counts: increment(state.duration_counts, duration_label),
-      number_counts: increment(state.number_counts, number_label),
-      color_counts: increment(state.color_counts, color_label),
-      link_counts: state.link_counts
+  let rs = case dict.get(state.run_stats, run_id) {
+    Ok(existing) -> existing
+    Error(_) -> empty_run_stats()
+  }
+
+  let new_rs =
+    RunStats(
+      total: rs.total + 1,
+      force_counts: increment(rs.force_counts, force_label),
+      duration_counts: increment(rs.duration_counts, duration_label),
+      number_counts: increment(rs.number_counts, number_label),
+      color_counts: increment(rs.color_counts, color_label),
+      link_counts: rs.link_counts
         |> increment(force_label <> "||" <> duration_label)
         |> increment(duration_label <> "||" <> number_label)
         |> increment(number_label <> "||" <> color_label),
-      dirty: True,
     )
+
+  let new_run_stats = dict.insert(state.run_stats, run_id, new_rs)
+  let new_dirty = set.insert(state.dirty_runs, run_id)
+
+  let new_state =
+    State(..state, run_stats: new_run_stats, dirty_runs: new_dirty)
 
   case new_state.flush_scheduled {
     True -> new_state
@@ -208,14 +288,9 @@ fn handle_message(state: State, msg: Msg) -> actor.Next(State, Msg) {
     ClientConnected(client) -> {
       let new_state =
         State(..state, connected_clients: [client, ..state.connected_clients])
-      let stats = build_stats(new_state)
-      let json =
-        messages.encode_server_message(messages.StatsSnapshot(stats))
-      process.send(client, json)
 
-      // Register client with DB actor for all-runs updates
-      process.send(state.db_actor, db.RegisterNoQuery(client))
-      process.send(state.db_actor, db.GetAllRuns(client))
+      process.send(state.db_actor, db.RegisterNoQuery(client, ""))
+      process.send(state.db_actor, db.GetRunList(client))
 
       actor.continue(new_state)
     }
@@ -223,27 +298,34 @@ fn handle_message(state: State, msg: Msg) -> actor.Next(State, Msg) {
     ClientDisconnected(client) -> {
       let connected =
         list.filter(state.connected_clients, fn(c) { c != client })
+      let client_selection = dict.delete(state.client_run_selection, client)
       process.send(state.db_actor, db.UnregisterClient(client))
-      actor.continue(State(..state, connected_clients: connected))
+      actor.continue(
+        State(
+          ..state,
+          connected_clients: connected,
+          client_run_selection: client_selection,
+        ),
+      )
     }
 
-    IngestTestRun(run) -> {
+    IngestSample(run_id, sample) -> {
       let new_state =
-        ingest_run_common(
+        ingest_sample_common(
           state,
-          run.force,
-          run.duration,
-          run.winning_number,
-          run.color,
+          run_id,
+          sample.force,
+          sample.duration,
+          sample.winning_number,
+          sample.color,
         )
 
-      // Convert to FullTestRun with defaults and store in DB
-      let full_run =
-        messages.FullTestRun(
-          force: run.force,
-          duration: run.duration,
-          winning_number: run.winning_number,
-          color: run.color,
+      let full_sample =
+        messages.FullSample(
+          force: sample.force,
+          duration: sample.duration,
+          winning_number: sample.winning_number,
+          color: sample.color,
           start_date: "",
           end_date: "",
           status: "pass",
@@ -251,37 +333,67 @@ fn handle_message(state: State, msg: Msg) -> actor.Next(State, Msg) {
           gherkin_text: "",
           step_metrics: [],
         )
-      process.send(state.db_actor, db.StoreRun(run: full_run))
+      process.send(
+        state.db_actor,
+        db.StoreSample(run_id:, sample: full_sample),
+      )
 
       actor.continue(new_state)
     }
 
-    IngestFullTestRun(run) -> {
+    IngestFullSample(run_id, sample) -> {
       let new_state =
-        ingest_run_common(
+        ingest_sample_common(
           state,
-          run.force,
-          run.duration,
-          run.winning_number,
-          run.color,
+          run_id,
+          sample.force,
+          sample.duration,
+          sample.winning_number,
+          sample.color,
         )
 
-      process.send(state.db_actor, db.StoreRun(run: run))
+      process.send(
+        state.db_actor,
+        db.StoreSample(run_id:, sample: sample),
+      )
+
+      actor.continue(new_state)
+    }
+
+    ClientSelectRun(client, run_id) -> {
+      let new_selection =
+        dict.insert(state.client_run_selection, client, run_id)
+      let new_state = State(..state, client_run_selection: new_selection)
+
+      let stats = case dict.get(state.run_stats, run_id) {
+        Ok(rs) -> build_stats_from_run_stats(rs)
+        Error(_) -> empty_stats()
+      }
+      let json =
+        messages.encode_server_message(messages.StatsSnapshot(stats))
+      process.send(client, json)
 
       actor.continue(new_state)
     }
 
     Flush -> {
-      case state.dirty {
-        True -> {
-          broadcast_stats(state)
-          persist_stats(state)
+      case set.is_empty(state.dirty_runs) {
+        True ->
+          actor.continue(State(..state, flush_scheduled: False))
+        False -> {
+          let _ = set.each(state.dirty_runs, fn(run_id) {
+            broadcast_stats_for_run(state, run_id)
+            persist_stats_for_run(state, run_id)
+          })
+          save_run_ids(state)
           actor.continue(
-            State(..state, dirty: False, flush_scheduled: False),
+            State(
+              ..state,
+              dirty_runs: set.new(),
+              flush_scheduled: False,
+            ),
           )
         }
-        False ->
-          actor.continue(State(..state, flush_scheduled: False))
       }
     }
   }
