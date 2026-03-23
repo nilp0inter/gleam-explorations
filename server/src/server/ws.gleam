@@ -40,17 +40,9 @@ pub fn handler(
   case msg {
     mist.Text(text) -> {
       case json.parse(text, messages.client_message_decoder()) {
-        Ok(messages.Subscribe(queue)) -> {
-          process.send(
-            ws_state.state_actor,
-            state.SubscribeToQueue(queue, ws_state.subject),
-          )
-        }
-        Ok(messages.Unsubscribe(queue)) -> {
-          process.send(
-            ws_state.state_actor,
-            state.UnsubscribeFromQueue(queue, ws_state.subject),
-          )
+        Ok(messages.SubmitTestRun(run)) -> {
+          let encoded = messages.encode_server_message(messages.NewTestRun(run))
+          process.send(ws_state.state_actor, state.BroadcastTestRun(encoded))
         }
         Error(_) -> Nil
       }

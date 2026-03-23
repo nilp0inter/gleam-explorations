@@ -1,47 +1,41 @@
 import gleam/dynamic/decode
 import gleam/json
 
+// === Types ===
+
+pub type TestRun {
+  TestRun(force: Float, duration: Float, winning_number: Int, color: String)
+}
+
 // === Server -> Client Messages ===
 
 pub type ServerMessage {
-  QueueList(queues: List(String))
-  NewQueue(name: String)
-  QueueState(queue: String, messages: List(String))
-  NewMessageInQueue(queue: String, message: String)
+  NewTestRun(run: TestRun)
 }
 
 // === Client -> Server Messages ===
 
 pub type ClientMessage {
-  Subscribe(queue: String)
-  Unsubscribe(queue: String)
+  SubmitTestRun(run: TestRun)
 }
 
 // === Encoders ===
 
+fn encode_test_run_fields(run: TestRun) -> List(#(String, json.Json)) {
+  [
+    #("force", json.float(run.force)),
+    #("duration", json.float(run.duration)),
+    #("winning_number", json.int(run.winning_number)),
+    #("color", json.string(run.color)),
+  ]
+}
+
 pub fn encode_server_message(msg: ServerMessage) -> String {
   case msg {
-    QueueList(queues) ->
+    NewTestRun(run) ->
       json.object([
-        #("type", json.string("queue_list")),
-        #("queues", json.array(queues, json.string)),
-      ])
-    NewQueue(name) ->
-      json.object([
-        #("type", json.string("new_queue")),
-        #("name", json.string(name)),
-      ])
-    QueueState(queue, messages) ->
-      json.object([
-        #("type", json.string("queue_state")),
-        #("queue", json.string(queue)),
-        #("messages", json.array(messages, json.string)),
-      ])
-    NewMessageInQueue(queue, message) ->
-      json.object([
-        #("type", json.string("new_message_in_queue")),
-        #("queue", json.string(queue)),
-        #("message", json.string(message)),
+        #("type", json.string("new_test_run")),
+        ..encode_test_run_fields(run)
       ])
   }
   |> json.to_string
@@ -49,15 +43,10 @@ pub fn encode_server_message(msg: ServerMessage) -> String {
 
 pub fn encode_client_message(msg: ClientMessage) -> String {
   case msg {
-    Subscribe(queue) ->
+    SubmitTestRun(run) ->
       json.object([
-        #("type", json.string("subscribe")),
-        #("queue", json.string(queue)),
-      ])
-    Unsubscribe(queue) ->
-      json.object([
-        #("type", json.string("unsubscribe")),
-        #("queue", json.string(queue)),
+        #("type", json.string("submit_test_run")),
+        ..encode_test_run_fields(run)
       ])
   }
   |> json.to_string
@@ -65,46 +54,34 @@ pub fn encode_client_message(msg: ClientMessage) -> String {
 
 // === Decoders ===
 
+fn test_run_decoder() -> decode.Decoder(TestRun) {
+  decode.field("force", decode.float, fn(force) {
+    decode.field("duration", decode.float, fn(duration) {
+      decode.field("winning_number", decode.int, fn(winning_number) {
+        decode.field("color", decode.string, fn(color) {
+          decode.success(TestRun(force:, duration:, winning_number:, color:))
+        })
+      })
+    })
+  })
+}
+
 pub fn server_message_decoder() -> decode.Decoder(ServerMessage) {
   use tag <- decode.then(decode.at(["type"], decode.string))
   case tag {
-    "queue_list" -> {
-      decode.at(["queues"], decode.list(decode.string))
-      |> decode.map(QueueList)
-    }
-    "new_queue" -> {
-      decode.at(["name"], decode.string)
-      |> decode.map(NewQueue)
-    }
-    "queue_state" -> {
-      decode.field("queue", decode.string, fn(queue) {
-        decode.field("messages", decode.list(decode.string), fn(messages) {
-          decode.success(QueueState(queue, messages))
-        })
-      })
-    }
-    "new_message_in_queue" -> {
-      decode.field("queue", decode.string, fn(queue) {
-        decode.field("message", decode.string, fn(message) {
-          decode.success(NewMessageInQueue(queue, message))
-        })
-      })
-    }
-    _ -> decode.failure(QueueList([]), "ServerMessage")
+    "new_test_run" -> test_run_decoder() |> decode.map(NewTestRun)
+    _ -> decode.failure(NewTestRun(TestRun(0.0, 0.0, 0, "")), "ServerMessage")
   }
 }
 
 pub fn client_message_decoder() -> decode.Decoder(ClientMessage) {
   use tag <- decode.then(decode.at(["type"], decode.string))
   case tag {
-    "subscribe" -> {
-      decode.at(["queue"], decode.string)
-      |> decode.map(Subscribe)
-    }
-    "unsubscribe" -> {
-      decode.at(["queue"], decode.string)
-      |> decode.map(Unsubscribe)
-    }
-    _ -> decode.failure(Subscribe(""), "ClientMessage")
+    "submit_test_run" -> test_run_decoder() |> decode.map(SubmitTestRun)
+    _ ->
+      decode.failure(
+        SubmitTestRun(TestRun(0.0, 0.0, 0, "")),
+        "ClientMessage",
+      )
   }
 }
