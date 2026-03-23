@@ -8,11 +8,18 @@ let activeSelection = [];      // node names currently selected from Gleam
 const DIM_OPACITY = 0.08;
 
 function getChart() {
-  if (chart) return chart;
   const el = document.getElementById("sankey-chart");
   if (!el) return null;
-  chart = echarts.init(el);
-  window.addEventListener("resize", () => chart && chart.resize());
+  // If the DOM element was replaced (Lustre re-render), re-init
+  if (chart && chart.getDom() !== el) {
+    chart.dispose();
+    chart = null;
+  }
+  if (!chart) {
+    chart = echarts.init(el);
+    eventsRegistered = false;
+    window.addEventListener("resize", () => chart && chart.resize());
+  }
   return chart;
 }
 
@@ -190,6 +197,7 @@ function setupChartEvents(c) {
 }
 
 export function updateChart(jsonString) {
+  pendingRedraw = jsonString;
   const c = getChart();
   if (!c) return;
 
@@ -279,6 +287,32 @@ export function highlightNodes(jsonArray) {
 
   externalHighlight = true;
   applyHighlight(c, computeActiveNodes(nodeNames));
+}
+
+let pendingRedraw = null;
+
+export function doResizeChart() {
+  // Dispose stale chart pointing to removed DOM node
+  if (chart) {
+    chart.dispose();
+    chart = null;
+    eventsRegistered = false;
+  }
+  // Poll until Lustre has patched the DOM and the element exists
+  function tryInit() {
+    const el = document.getElementById("sankey-chart");
+    if (!el) {
+      requestAnimationFrame(tryInit);
+      return;
+    }
+    if (pendingRedraw) {
+      updateChart(pendingRedraw);
+    }
+    if (activeSelection.length > 0 && chart) {
+      applyHighlight(chart, computeActiveNodes(activeSelection));
+    }
+  }
+  requestAnimationFrame(tryInit);
 }
 
 export function clearHighlight() {

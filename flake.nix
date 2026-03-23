@@ -16,6 +16,7 @@
           packages = with pkgs; [
             gleam
             erlang
+            elixir
             rebar3
             nodejs
             go-task

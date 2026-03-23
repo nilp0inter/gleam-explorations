@@ -1,5 +1,6 @@
 build/
 .task/
+.data/
 node_modules/
 server/priv/static/app.js
 server/priv/static/app.css

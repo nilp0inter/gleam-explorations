@@ -2,6 +2,7 @@ import gleam/erlang/process
 import gleam/json
 import gleam/option.{Some}
 import mist
+import server/db
 import server/state
 import shared/messages
 
@@ -9,11 +10,13 @@ pub type WsState {
   WsState(
     subject: process.Subject(String),
     state_actor: process.Subject(state.Msg),
+    db_actor: process.Subject(db.Msg),
   )
 }
 
 pub fn on_init(
   state_actor: process.Subject(state.Msg),
+  db_actor: process.Subject(db.Msg),
 ) -> fn(mist.WebsocketConnection) ->
   #(WsState, option.Option(process.Selector(String))) {
   fn(_conn: mist.WebsocketConnection) {
@@ -26,7 +29,11 @@ pub fn on_init(
       |> process.select(for: client_subject)
 
     #(
-      WsState(subject: client_subject, state_actor: state_actor),
+      WsState(
+        subject: client_subject,
+        state_actor: state_actor,
+        db_actor: db_actor,
+      ),
       Some(selector),
     )
   }
@@ -42,6 +49,30 @@ pub fn handler(
       case json.parse(text, messages.client_message_decoder()) {
         Ok(messages.SubmitTestRun(run)) -> {
           process.send(ws_state.state_actor, state.IngestTestRun(run))
+        }
+        Ok(messages.SubmitFullTestRun(run)) -> {
+          process.send(
+            ws_state.state_actor,
+            state.IngestFullTestRun(run),
+          )
+        }
+        Ok(messages.SetSelection(nodes)) -> {
+          process.send(
+            ws_state.db_actor,
+            db.RegisterQuery(ws_state.subject, nodes),
+          )
+        }
+        Ok(messages.ClearSelectionQuery) -> {
+          process.send(
+            ws_state.db_actor,
+            db.UnregisterQuery(ws_state.subject),
+          )
+        }
+        Ok(messages.RequestRunDetail(id)) -> {
+          process.send(
+            ws_state.db_actor,
+            db.GetRunDetail(id, ws_state.subject),
+          )
         }
         Error(_) -> Nil
       }

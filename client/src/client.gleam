@@ -11,7 +11,9 @@ import lustre/element/html
 import lustre/event
 import lustre_websocket as ws
 import shared/classify
-import shared/messages.{type Stats}
+import shared/messages.{
+  type RunDetail, type RunSummary, type Stats, type StepMetric,
+}
 
 // === FFI ===
 
@@ -24,7 +26,15 @@ fn do_highlight_nodes(json_array: String) -> Nil
 @external(javascript, "./client_ffi.mjs", "clearHighlight")
 fn do_clear_highlight() -> Nil
 
+@external(javascript, "./client_ffi.mjs", "doResizeChart")
+fn do_resize_chart() -> Nil
+
 // === Model ===
+
+pub type Tab {
+  SankeyTab
+  TableTab
+}
 
 pub type Model {
   Model(
@@ -32,6 +42,10 @@ pub type Model {
     socket: Option(ws.WebSocket),
     expanded_steps: List(Int),
     selected_nodes: List(String),
+    active_tab: Tab,
+    runs: List(RunSummary),
+    expanded_run_id: Option(Int),
+    run_detail: Option(RunDetail),
   )
 }
 
@@ -42,6 +56,9 @@ pub type Msg {
   ToggleStep(Int)
   ToggleNode(node: String, depth: Int, ctrl: Bool)
   ClearSelection
+  SwitchTab(Tab)
+  ClickRun(Int)
+  CollapseRun
 }
 
 // === Init ===
@@ -53,11 +70,19 @@ fn init(_flags) -> #(Model, effect.Effect(Msg)) {
       socket: None,
       expanded_steps: [],
       selected_nodes: [],
+      active_tab: SankeyTab,
+      runs: [],
+      expanded_run_id: None,
+      run_detail: None,
     )
   #(model, ws.init("/ws", WsEvent))
 }
 
 // === Highlight effect ===
+
+fn resize_chart() -> effect.Effect(Msg) {
+  effect.from(fn(_d) { do_resize_chart() })
+}
 
 fn apply_highlight(selected_nodes: List(String)) -> effect.Effect(Msg) {
   case selected_nodes {
@@ -68,6 +93,21 @@ fn apply_highlight(selected_nodes: List(String)) -> effect.Effect(Msg) {
         |> json.to_string
       effect.from(fn(_d) { do_highlight_nodes(json_str) })
     }
+  }
+}
+
+// === WebSocket send helpers ===
+
+fn ws_send(
+  socket: Option(ws.WebSocket),
+  msg: messages.ClientMessage,
+) -> effect.Effect(Msg) {
+  case socket {
+    Some(s) -> {
+      let json_str = messages.encode_client_message(msg)
+      ws.send(s, json_str)
+    }
+    None -> effect.none()
   }
 }
 
@@ -91,6 +131,13 @@ fn update_chart(stats: Stats) -> effect.Effect(Msg) {
   })
 }
 
+fn send_selection_query(model: Model) -> effect.Effect(Msg) {
+  case model.selected_nodes {
+    [] -> ws_send(model.socket, messages.ClearSelectionQuery)
+    nodes -> ws_send(model.socket, messages.SetSelection(nodes))
+  }
+}
+
 fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
   case msg {
     WsEvent(ws.OnOpen(socket)) -> {
@@ -102,6 +149,37 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
         Ok(messages.StatsSnapshot(stats)) -> {
           let new_model = Model(..model, stats: Some(stats))
           #(new_model, update_chart(stats))
+        }
+        Ok(messages.AllRuns(runs)) -> {
+          #(
+            Model(
+              ..model,
+              runs: runs,
+              expanded_run_id: None,
+              run_detail: None,
+            ),
+            effect.none(),
+          )
+        }
+        Ok(messages.MatchingRuns(runs)) -> {
+          #(
+            Model(
+              ..model,
+              runs: runs,
+              expanded_run_id: None,
+              run_detail: None,
+            ),
+            effect.none(),
+          )
+        }
+        Ok(messages.MatchingRunAppend(run)) -> {
+          #(Model(..model, runs: [run, ..model.runs]), effect.none())
+        }
+        Ok(messages.NewRun(run)) -> {
+          #(Model(..model, runs: [run, ..model.runs]), effect.none())
+        }
+        Ok(messages.RunDetailResponse(detail)) -> {
+          #(Model(..model, run_detail: Some(detail)), effect.none())
         }
         Error(_) -> #(model, effect.none())
       }
@@ -128,7 +206,12 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
               }),
               selected_nodes: new_selected,
             )
-          #(new_model, apply_highlight(new_selected))
+          let eff =
+            effect.batch([
+              apply_highlight(new_selected),
+              send_selection_query(new_model),
+            ])
+          #(new_model, eff)
         }
         False -> {
           #(
@@ -144,41 +227,70 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
 
     ToggleNode(node, depth, ctrl) -> {
       let is_selected = list.contains(model.selected_nodes, node)
-      case is_selected {
-        True -> {
-          let new_selected =
-            list.filter(model.selected_nodes, fn(n) { n != node })
-          let new_model = Model(..model, selected_nodes: new_selected)
-          #(new_model, apply_highlight(new_selected))
-        }
-        False -> {
+      let new_selected = case is_selected {
+        True -> list.filter(model.selected_nodes, fn(n) { n != node })
+        False ->
           case ctrl {
-            // Ctrl+click: add node to selection (OR within same depth)
-            True -> {
-              let new_selected = [node, ..model.selected_nodes]
-              let new_model = Model(..model, selected_nodes: new_selected)
-              #(new_model, apply_highlight(new_selected))
-            }
-            // Normal click: replace selection at this depth
+            True -> [node, ..model.selected_nodes]
             False -> {
               let depth_buckets = classify.bucket_names_for_depth(depth)
               let without_depth =
                 list.filter(model.selected_nodes, fn(n) {
                   !list.contains(depth_buckets, n)
                 })
-              let new_selected = [node, ..without_depth]
-              let new_model = Model(..model, selected_nodes: new_selected)
-              #(new_model, apply_highlight(new_selected))
+              [node, ..without_depth]
             }
           }
+      }
+      let new_model = Model(..model, selected_nodes: new_selected)
+      let eff =
+        effect.batch([
+          apply_highlight(new_selected),
+          send_selection_query(new_model),
+        ])
+      #(new_model, eff)
+    }
+
+    ClearSelection -> {
+      let new_model =
+        Model(..model, expanded_steps: [], selected_nodes: [])
+      let eff =
+        effect.batch([
+          effect.from(fn(_d) { do_clear_highlight() }),
+          ws_send(model.socket, messages.ClearSelectionQuery),
+        ])
+      #(new_model, eff)
+    }
+
+    SwitchTab(tab) -> {
+      let eff = case tab {
+        SankeyTab -> resize_chart()
+        TableTab -> effect.none()
+      }
+      #(Model(..model, active_tab: tab), eff)
+    }
+
+    ClickRun(id) -> {
+      case model.expanded_run_id {
+        Some(current_id) if current_id == id -> {
+          #(
+            Model(..model, expanded_run_id: None, run_detail: None),
+            effect.none(),
+          )
+        }
+        _ -> {
+          let new_model =
+            Model(..model, expanded_run_id: Some(id), run_detail: None)
+          let eff = ws_send(model.socket, messages.RequestRunDetail(id))
+          #(new_model, eff)
         }
       }
     }
 
-    ClearSelection -> {
+    CollapseRun -> {
       #(
-        Model(..model, expanded_steps: [], selected_nodes: []),
-        effect.from(fn(_d) { do_clear_highlight() }),
+        Model(..model, expanded_run_id: None, run_detail: None),
+        effect.none(),
       )
     }
   }
@@ -189,7 +301,7 @@ fn update(model: Model, msg: Msg) -> #(Model, effect.Effect(Msg)) {
 fn view(model: Model) -> Element(Msg) {
   html.div(
     [attribute.class("flex h-screen bg-gray-50 text-gray-900 font-sans")],
-    [view_gherkin(model), view_chart()],
+    [view_gherkin(model), view_right_panel(model)],
   )
 }
 
@@ -215,7 +327,6 @@ fn get_bucket_counts(
       }
     None -> []
   }
-  // Convert BucketCount list to tuples, ensuring all bucket names present
   let count_map =
     list.map(counts, fn(bc) { #(bc.name, bc.count) })
   let buckets = classify.bucket_names_for_depth(depth)
@@ -316,20 +427,6 @@ fn view_gherkin(model: Model) -> Element(Msg) {
           ])
       },
       html.div([attribute.class("mt-6 space-y-2")], [
-        html.div(
-          [attribute.class("flex items-center gap-2 text-sm text-gray-600")],
-          [
-            html.span(
-              [
-                attribute.class(
-                  "inline-flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 font-bold text-xs",
-                ),
-              ],
-              [text(int.to_string(get_total(model)))],
-            ),
-            text("test runs received"),
-          ],
-        ),
         case model.socket {
           Some(_) ->
             html.div(
@@ -549,8 +646,50 @@ fn depth_label(depth: Int) -> String {
   }
 }
 
-fn view_chart() -> Element(Msg) {
+// === Right panel with tabs ===
+
+fn view_right_panel(model: Model) -> Element(Msg) {
   html.div([attribute.class("flex-1 flex flex-col min-w-0 p-4")], [
+    // Tab bar
+    html.div(
+      [attribute.class("flex border-b border-gray-200 mb-3")],
+      [
+        tab_button("Sankey", SankeyTab, model.active_tab),
+        tab_button(
+          "Runs (" <> int.to_string(list.length(model.runs)) <> ")",
+          TableTab,
+          model.active_tab,
+        ),
+      ],
+    ),
+    // Tab content
+    case model.active_tab {
+      SankeyTab -> view_sankey_content()
+      TableTab -> view_table_content(model)
+    },
+  ])
+}
+
+fn tab_button(label: String, tab: Tab, active_tab: Tab) -> Element(Msg) {
+  let is_active = tab == active_tab
+  html.button(
+    [
+      attribute.class(
+        "px-4 py-2 text-sm font-medium border-b-2 transition-colors "
+        <> case is_active {
+          True -> "border-indigo-500 text-indigo-600"
+          False ->
+            "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+        },
+      ),
+      event.on_click(SwitchTab(tab)),
+    ],
+    [text(label)],
+  )
+}
+
+fn view_sankey_content() -> Element(Msg) {
+  html.div([attribute.class("flex-1 flex flex-col min-h-0")], [
     html.h2(
       [
         attribute.class(
@@ -568,6 +707,280 @@ fn view_chart() -> Element(Msg) {
       [],
     ),
   ])
+}
+
+fn view_table_content(model: Model) -> Element(Msg) {
+  html.div([attribute.class("flex-1 flex flex-col min-h-0 overflow-hidden")], [
+    // Table
+    html.div([attribute.class("flex-1 overflow-y-auto")], [
+      case model.runs {
+        [] ->
+          html.div(
+            [attribute.class("text-center text-gray-400 py-12")],
+            [text("No runs yet")],
+          )
+        runs -> view_runs_table(runs, model)
+      },
+    ]),
+    // Detail panel
+    case model.expanded_run_id {
+      Some(_) -> view_detail_panel(model)
+      None -> element.none()
+    },
+  ])
+}
+
+fn view_runs_table(
+  runs: List(RunSummary),
+  model: Model,
+) -> Element(Msg) {
+  html.table(
+    [attribute.class("w-full text-sm")],
+    [
+      html.thead([], [
+        html.tr(
+          [
+            attribute.class(
+              "bg-gray-100 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider",
+            ),
+          ],
+          [
+            html.th([attribute.class("px-3 py-2 w-16")], [text("ID")]),
+            html.th([attribute.class("px-3 py-2")], [text("Start")]),
+            html.th([attribute.class("px-3 py-2")], [text("End")]),
+            html.th([attribute.class("px-3 py-2 w-20")], [text("Status")]),
+          ],
+        ),
+      ]),
+      html.tbody(
+        [],
+        list.map(runs, fn(run) { view_run_row(run, model) }),
+      ),
+    ],
+  )
+}
+
+fn view_run_row(run: RunSummary, model: Model) -> Element(Msg) {
+  let is_expanded = model.expanded_run_id == Some(run.id)
+  html.tr(
+    [
+      attribute.class(
+        "border-b border-gray-100 cursor-pointer transition-colors "
+        <> case is_expanded {
+          True -> "bg-indigo-50"
+          False -> "hover:bg-gray-50"
+        },
+      ),
+      event.on_click(ClickRun(run.id)),
+    ],
+    [
+      html.td(
+        [attribute.class("px-3 py-2 font-mono text-xs text-gray-600")],
+        [text(int.to_string(run.id))],
+      ),
+      html.td(
+        [attribute.class("px-3 py-2 text-xs text-gray-600")],
+        [text(format_date(run.start_date))],
+      ),
+      html.td(
+        [attribute.class("px-3 py-2 text-xs text-gray-600")],
+        [text(format_date(run.end_date))],
+      ),
+      html.td([attribute.class("px-3 py-2")], [
+        status_badge(run.status),
+      ]),
+    ],
+  )
+}
+
+fn format_date(iso: String) -> String {
+  case iso {
+    "" -> "-"
+    d -> d
+  }
+}
+
+fn status_badge(status: String) -> Element(Msg) {
+  let cls = case status {
+    "pass" -> "bg-green-100 text-green-700"
+    "fail" -> "bg-red-100 text-red-700"
+    _ -> "bg-gray-100 text-gray-600"
+  }
+  html.span(
+    [attribute.class("inline-block px-2 py-0.5 rounded text-xs font-medium " <> cls)],
+    [text(status)],
+  )
+}
+
+fn view_detail_panel(model: Model) -> Element(Msg) {
+  html.div(
+    [
+      attribute.class(
+        "border-t border-gray-200 bg-white max-h-[50%] overflow-y-auto p-4",
+      ),
+    ],
+    [
+      case model.run_detail {
+        None ->
+          html.div(
+            [attribute.class("text-center text-gray-400 py-4")],
+            [text("Loading...")],
+          )
+        Some(detail) -> view_run_detail(detail)
+      },
+    ],
+  )
+}
+
+fn view_run_detail(detail: RunDetail) -> Element(Msg) {
+  html.div([attribute.class("space-y-4")], [
+    // Header
+    html.div(
+      [attribute.class("flex items-center justify-between")],
+      [
+        html.h3([attribute.class("text-sm font-bold text-gray-700")], [
+          text("Run #" <> int.to_string(detail.id)),
+        ]),
+        html.div([attribute.class("flex gap-2")], [
+          status_badge(detail.status),
+          html.button(
+            [
+              attribute.class(
+                "text-xs text-gray-400 hover:text-gray-600 ml-2",
+              ),
+              event.on_click(CollapseRun),
+            ],
+            [text("Close")],
+          ),
+        ]),
+      ],
+    ),
+    // Metadata
+    html.div(
+      [attribute.class("grid grid-cols-2 gap-2 text-xs")],
+      [
+        detail_field("Force", float_to_short(detail.force) <> " (" <> detail.force_label <> ")"),
+        detail_field("Duration", float_to_short(detail.duration) <> " (" <> detail.duration_label <> ")"),
+        detail_field("Number", int.to_string(detail.winning_number) <> " (" <> detail.number_label <> ")"),
+        detail_field("Color", detail.color <> " (" <> detail.color_label <> ")"),
+      ],
+    ),
+    // Gherkin
+    case detail.gherkin_text {
+      "" -> element.none()
+      gherkin ->
+        html.div([], [
+          html.h4(
+            [
+              attribute.class(
+                "text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1",
+              ),
+            ],
+            [text("Gherkin")],
+          ),
+          html.pre(
+            [
+              attribute.class(
+                "bg-gray-50 rounded p-3 text-xs font-mono whitespace-pre-wrap border border-gray-200",
+              ),
+            ],
+            [text(gherkin)],
+          ),
+        ])
+    },
+    // Step metrics
+    case detail.step_metrics {
+      [] -> element.none()
+      metrics ->
+        html.div([], [
+          html.h4(
+            [
+              attribute.class(
+                "text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1",
+              ),
+            ],
+            [text("Steps")],
+          ),
+          view_step_metrics_table(metrics),
+        ])
+    },
+    // Logs
+    case detail.logs {
+      [] -> element.none()
+      logs ->
+        html.div([], [
+          html.h4(
+            [
+              attribute.class(
+                "text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1",
+              ),
+            ],
+            [text("Logs")],
+          ),
+          html.div(
+            [
+              attribute.class(
+                "bg-gray-900 text-green-400 rounded p-3 text-xs font-mono max-h-40 overflow-y-auto",
+              ),
+            ],
+            list.map(logs, fn(line) {
+              html.div([], [text(line)])
+            }),
+          ),
+        ])
+    },
+  ])
+}
+
+fn detail_field(label: String, value: String) -> Element(Msg) {
+  html.div([attribute.class("bg-gray-50 rounded px-2 py-1 border border-gray-200")], [
+    html.span([attribute.class("text-gray-500")], [text(label <> ": ")]),
+    html.span([attribute.class("font-medium text-gray-700")], [text(value)]),
+  ])
+}
+
+fn view_step_metrics_table(metrics: List(StepMetric)) -> Element(Msg) {
+  html.table(
+    [attribute.class("w-full text-xs border border-gray-200 rounded")],
+    [
+      html.thead([], [
+        html.tr(
+          [attribute.class("bg-gray-100 text-left text-gray-500")],
+          [
+            html.th([attribute.class("px-2 py-1")], [text("Step")]),
+            html.th([attribute.class("px-2 py-1 w-24 text-right")], [
+              text("Duration (ms)"),
+            ]),
+            html.th([attribute.class("px-2 py-1 w-16")], [text("Status")]),
+          ],
+        ),
+      ]),
+      html.tbody(
+        [],
+        list.map(metrics, fn(m) {
+          html.tr(
+            [attribute.class("border-t border-gray-100")],
+            [
+              html.td([attribute.class("px-2 py-1 text-gray-700")], [
+                text(m.name),
+              ]),
+              html.td(
+                [
+                  attribute.class(
+                    "px-2 py-1 text-right font-mono text-gray-600",
+                  ),
+                ],
+                [text(float_to_short(m.duration_ms))],
+              ),
+              html.td([attribute.class("px-2 py-1")], [
+                status_badge(m.status),
+              ]),
+            ],
+          )
+        }),
+      ),
+    ],
+  )
 }
 
 // === Main ===
